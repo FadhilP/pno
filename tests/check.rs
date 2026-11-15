@@ -115,7 +115,7 @@ fn invalid_inputs_give_located_errors() {
         (
             "velocity_range",
             format!("1 rh | C5:v+60 | D5 | E5 | F5 |\n1 lh {R}"),
-            "the velocity of C5 is 140; it must be 1 to 127",
+            "the velocity of C5 is 128; it must be 1 to 127",
         ),
         (
             "tuplet_slots",

@@ -39,8 +39,8 @@ const DROPPED_ATTRS: [&str; 13] = [
 ];
 
 const MOMENTARY: [&str; 8] = ["sf", "sfz", "fz", "rf", "rfz", "sffz", "fp", "sfp"];
-const DEFAULT_LEVEL: f64 = 80.0 / 90.0 * 100.0;
-const P_LEVEL: f64 = 49.0 / 90.0 * 100.0;
+const DEFAULT_LEVEL: f64 = 68.0 / 90.0 * 100.0;
+const P_LEVEL: f64 = 48.0 / 90.0 * 100.0;
 
 fn child<'a>(n: Node<'a, 'a>, tag: &str) -> Option<Node<'a, 'a>> {
     n.children().find(|c| c.has_tag_name(tag))
@@ -537,16 +537,16 @@ fn direction_level(direction: Node) -> Option<f64> {
 
 fn table_level(mark: &str) -> Option<f64> {
     let velocity = match mark {
-        "pppp" => 8.0,
-        "ppp" => 16.0,
-        "pp" => 33.0,
-        "p" => 49.0,
-        "mp" => 64.0,
-        "mf" => 80.0,
-        "f" | "fp" => 96.0,
-        "ff" | "sf" | "sfz" | "sfp" | "fz" | "rf" | "rfz" => 112.0,
-        "fff" | "sffz" => 126.0,
-        "ffff" => 127.0,
+        "pppp" => 16.0,
+        "ppp" => 26.0,
+        "pp" => 38.0,
+        "p" => 48.0,
+        "mp" => 58.0,
+        "mf" => 68.0,
+        "f" | "fp" => 80.0,
+        "ff" | "sf" | "sfz" | "sfp" | "fz" | "rf" | "rfz" => 92.0,
+        "fff" | "sffz" => 106.0,
+        "ffff" => 120.0,
         _ => return None,
     };
     Some(velocity / 90.0 * 100.0)

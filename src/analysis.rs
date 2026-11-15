@@ -1071,7 +1071,7 @@ impl<'a> Analysis<'a> {
     }
 }
 
-pub const DEFAULT_VELOCITY: f64 = 80.0;
+pub const DEFAULT_VELOCITY: f64 = 68.0;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum LevelFrom {

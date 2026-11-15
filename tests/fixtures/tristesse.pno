@@ -12,12 +12,14 @@
 0  rh      | x B3:su( |
 0  lh      | x r |
 
+1  @       vel.mp=64
 1  rh.dyn  | _ | mp:above |
 1  rh      | E4 - D#4 E4) | D#4+F#4:su( |
 1  rh2     | G#3 B3 G#3 B3 | A3 B3 A3 B3 |
 1  lh      | E2 B2:ac - B2 | B1 B2:ac - B2 |
 1  lh2     | E2 | B1 |
 
+2  @       vel.mf=80
 2  rh.dyn  | _ mf:above | mp:above |
 2  rh      | ~F#4 G#4 G#4 F#4) | E4+G#4:ac:su( |
 2  rh2     | A3 B3 A3 B3 | G#3 B3 G#3 B3 |
@@ -28,8 +30,8 @@
 3  @       vel.fp=64
 3  rh.dyn  | _ mf:above | fp:above _ _ mp:above |
 3  rh      | ~G#4 A4 A4 G#4) | C#5:su( - - B4 |
-3  rh2     | G#3 E4 B3 E4 | D#4 A4:v-11 B3:v-11 D#4 |
-3  lh      | E2 B2 - B2 | B1 B2:v-11 - B2 |
+3  rh2     | G#3 E4 B3 E4 | D#4 A4:v-12 B3:v-12 D#4 |
+3  lh      | E2 B2 - B2 | B1 B2:v-12 - B2 |
 3  lh2     | E2 | B1 |
 
 4  rh      | A4 G#4 D#4 E4) | F#4:ac:su( |
@@ -39,9 +41,9 @@
 
 5  @       vel.fp=80
 5  rh.dyn  | fp:above _ mf:above _ | p:above |
-5  rh      | ~F#4 G#4:v-11 G#4 F#4 | E4:ac) |
-5  rh2     | A3+C#4 B3+D#4:v-11 A3+C#4 B3+D#4) | G#3 B3 G#3 B3 |
-5  lh      | B1 B2:v-11 - B2 | E2 B2 - B2 |
+5  rh      | ~F#4 G#4:v-12 G#4 F#4 | E4:ac) |
+5  rh2     | A3+C#4 B3+D#4:v-12 A3+C#4 B3+D#4) | G#3 B3 G#3 B3 |
+5  lh      | B1 B2:v-12 - B2 | E2 B2 - B2 |
 5  lh2     | B1 | E2 |
 
 6  @       break=system
@@ -83,8 +85,8 @@
 11 @       vel.fp=64
 11 rh.dyn  | _ mf:above | fp:above _ _ mp:above |
 11 rh      | ~G#4 A4 A4 G#4) | C#5:su( - - B4 |
-11 rh2     | G#3 E4 B3 E4 | D#4 A4:v-11 B3:v-11 D#4 |
-11 lh      | E2 B2 - B2 | B1 B2:v-11 - B2 |
+11 rh2     | G#3 E4 B3 E4 | D#4 A4:v-12 B3:v-12 D#4 |
+11 lh      | E2 B2 - B2 | B1 B2:v-12 - B2 |
 11 lh2     | E2 | B1 |
 
 12 @       break=system
@@ -94,9 +96,9 @@
 12 lh2     | E2 | B1 |
 
 13 rh.dyn  | fp:above _ mf:above _ | mp:above |
-13 rh      | ~F#4 G#4:v-11 G#4 F#4 | E4:ac) |
-13 rh2     | A3+C#4 B3+D#4:v-11 A3+C#4 B3+D#4) | G#3 B3 G#3 B3 |
-13 lh      | B1 B2:v-11 - B2 | E2 B2 - B2 |
+13 rh      | ~F#4 G#4:v-12 G#4 F#4 | E4:ac) |
+13 rh2     | A3+C#4 B3+D#4:v-12 A3+C#4 B3+D#4) | G#3 B3 G#3 B3 |
+13 lh      | B1 B2:v-12 - B2 | E2 B2 - B2 |
 13 lh2     | B1 | E2 |
 
 14 rh.txt  | "cresc.":below | - |

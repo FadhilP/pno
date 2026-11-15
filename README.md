@@ -49,7 +49,7 @@ cargo install --path .
 
 - Rust 1.85 or later.
 - [MuseScore 4](https://musescore.org) for `render`, for PDF, PNG, SVG and audio export, and for `.mxl` and `.mscz` import. If it is not in the default place, set `PNO_MUSESCORE` to the path of its program.
-- For Claude Code, copy `skill/pno` to `~/.claude/skills/pno`.
+- For Claude Code, copy `skill/pno` to `~/.claude/skills/pno`, and `skill/audio-to-pno` to `~/.claude/skills/audio-to-pno`.
 
 ## Use
 
