@@ -1,0 +1,119 @@
+@ format=1
+@ title="Étude Op. 10 No. 3 in E major"
+@ subtitle="\"Tristesse\""
+@ composer="Frédéric Chopin"
+@ key=4#
+@ time=2/4
+
+0  @       vel.p=60
+0  tempo   | x "Lento, ma non troppo"=25 |
+0  rh.txt  | x "legato" |
+0  rh.dyn  | x p |
+0  rh      | x B3:su( |
+0  lh      | x r |
+
+1  rh.dyn  | _ | mp:above |
+1  rh      | E4 - D#4 E4) | D#4+F#4:su( |
+1  rh2     | G#3 B3 G#3 B3 | A3 B3 A3 B3 |
+1  lh      | E2 B2:ac - B2 | B1 B2:ac - B2 |
+1  lh2     | E2 | B1 |
+
+2  rh.dyn  | _ mf:above | mp:above |
+2  rh      | ~F#4 G#4 G#4 F#4) | E4+G#4:ac:su( |
+2  rh2     | A3 B3 A3 B3 | G#3 B3 G#3 B3 |
+2  rh3     | ~D#4 D#4 | _ |
+2  lh      | B1 B2:ac - B2 | E2 B2:ac - B2 |
+2  lh2     | B1 | E2 |
+
+3  @       vel.fp=64
+3  rh.dyn  | _ mf:above | fp:above _ _ mp:above |
+3  rh      | ~G#4 A4 A4 G#4) | C#5:su( - - B4 |
+3  rh2     | G#3 E4 B3 E4 | D#4 A4:v-11 B3:v-11 D#4 |
+3  lh      | E2 B2 - B2 | B1 B2:v-11 - B2 |
+3  lh2     | E2 | B1 |
+
+4  rh      | A4 G#4 D#4 E4) | F#4:ac:su( |
+4  rh2     | B3 E4 G#3 B3 | A3+C#4:sd( B3+D#4 A3+C#4 B3+D#4 |
+4  lh      | E2 B2 - B2 | B1 B2 - B2 |
+4  lh2     | E2 | B1 |
+
+5  @       vel.fp=80
+5  rh.dyn  | fp:above _ mf:above _ | p:above |
+5  rh      | ~F#4 G#4:v-11 G#4 F#4 | E4:ac) |
+5  rh2     | A3+C#4 B3+D#4:v-11 A3+C#4 B3+D#4) | G#3 B3 G#3 B3 |
+5  lh      | B1 B2:v-11 - B2 | E2 B2 - B2 |
+5  lh2     | B1 | E2 |
+
+6  @       break=system
+6  rh.txt  | _ | "cresc.":below - |
+6  rh.dyn  | _ | mp |
+6  rh      | G#4:su( A4 F#4 G#4 | A4 B4 G#4 A4 |
+6  rh2     | D4 E4 D4 E4 | C#4 E4 C#4 E4 |
+6  lh      | E2 E3 - E3 | A2 E3 - E3 |
+6  lh2     | E2 | A2 |
+
+7  rh.txt  | - | "stretto":below |
+7  rh.dyn  | _ | mf |
+7  rh      | C#5) F#4:ac:su( | - - {/A#4:su(}G#4:ac:su)( F#4) |
+7  rh2     | C#4 E4 C#4 E4 | B3 E4 B3 E4 |
+7  lh      | A2 F#3:ac - F#3 | B2 F#3:ac - F#3 |
+7  lh2     | A2 | B2 |
+
+8  rh.txt  | _ | "ten." |
+8  rh.txt2 | _ | "riten.":below |
+8  rh      | ~F#4 - {/A#4:su(}G#4) F#4 | D#4+B4:ac) |
+8  rh2     | A#3 E4 A#3 E4 | A3 B3 A3 B3 |
+8  lh      | C#3 F#3 - F#3 | B2 F#3 - F#3 |
+8  lh2     | C#3 | B2 |
+
+9  rh.txt  | "a tempo" | _ |
+9  rh.dyn  | p | mp |
+9  rh      | E4+G#4:su( - D#4 E4) | D#4+F#4:su( |
+9  rh2     | G#3 B3 G#3 B3 | A3 B3 A3 B3 |
+9  lh      | E2 B2 - B2 | B1 B2 - B2 |
+9  lh2     | E2 | B1 |
+
+10 rh.dyn  | _ mf:above | mp:above |
+10 rh      | ~F#4 G#4 G#4 F#4) | E4+G#4:ac:su( |
+10 rh2     | A3 B3 A3 B3 | G#3 B3 G#3 B3 |
+10 rh3     | ~D#4 D#4 | _ |
+10 lh      | B1 B2 - B2 | E2 B2 - B2 |
+10 lh2     | B1 | E2 |
+
+11 @       vel.fp=64
+11 rh.dyn  | _ mf:above | fp:above _ _ mp:above |
+11 rh      | ~G#4 A4 A4 G#4) | C#5:su( - - B4 |
+11 rh2     | G#3 E4 B3 E4 | D#4 A4:v-11 B3:v-11 D#4 |
+11 lh      | E2 B2 - B2 | B1 B2:v-11 - B2 |
+11 lh2     | E2 | B1 |
+
+12 @       break=system
+12 rh      | A4 G#4 D#4 E4) | F#4:ac:su( |
+12 rh2     | B3 E4 G#3 B3 | A3+C#4:sd( B3+D#4 A3+C#4 B3+D#4 |
+12 lh      | E2 B2 - B2 | B1 B2 - B2 |
+12 lh2     | E2 | B1 |
+
+13 rh.dyn  | fp:above _ mf:above _ | mp:above |
+13 rh      | ~F#4 G#4:v-11 G#4 F#4 | E4:ac) |
+13 rh2     | A3+C#4 B3+D#4:v-11 A3+C#4 B3+D#4) | G#3 B3 G#3 B3 |
+13 lh      | B1 B2:v-11 - B2 | E2 B2 - B2 |
+13 lh2     | B1 | E2 |
+
+14 rh.txt  | "cresc.":below | - |
+14 rh      | B4:su( C#5) C#5:su( B4) | A4:su( B4 G#4 A4) |
+14 rh2     | D4+F#4 E4+G#4 D4+F#4 E4+G#4 | C#4 E4 C#4 E4 |
+14 lh      | E2 E3:ac - E3 | A2 E3:ac - E3 |
+14 lh2     | E2 | A2 |
+
+15 rh.txt  | "stretto":below | _ "cresc.":below - - |
+15 rh.dyn  | mf | _ |
+15 rh      | D#5!:su( E5) E5:su( D#5) | C#5:su( D#5 B#4 C#5) |
+15 rh2     | F#4+B#4 G#4 F#4+A#4 G#4+B4 | E4 G#4 E4 G#4 |
+15 lh      | G#2 G#3 - G#3 | C#3 G#3 - G#3 |
+15 lh2     | G#2 | C#3 |
+
+16 rh.txt  | - | - |
+16 rh.txt2 | _ "ritenuto":below | _ |
+16 rh.dyn  | "con forza"=112:above | _ |
+16 rh      | E4+A#4+E5:st:su( F#4+A#4+F#5:st D#4+A#4+D#5:st E4+A#4+E5:st | F#4+A#4+F#5:st G#4+A#4+G#5:st E4+A#4+E5:st F#4+A#4+F#5:st) |
+16 lh      | C#3+E3+F#3+A#3 C#3+E3+F#3+A#3 C#3+E3+F#3+A#3 C#3+E3+F#3+A#3 | C3+E3+F#3+A#3 C3+E3+F#3+A#3 C3+E3+F#3+A#3 C3+E3+F#3+A#3 |

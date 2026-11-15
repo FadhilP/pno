@@ -1,0 +1,5 @@
+@ format=1
+
+1 @  cells=6
+1 rh | C5:ferm | D5:small E5:small F5:small G5:small | A5:small B5:small C6:small D6:small | E6 | - | r:ferm |
+1 lh | R |

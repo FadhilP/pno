@@ -1,0 +1,9 @@
+@ format=1
+
+1 rh      | R |
+1 lh      | C3 G3 | E4 G4 | C5 E5 | G5 |
+1 lh.clef | _ | _ | treble | _ |
+
+2 rh      | R |
+2 lh      | C3 | E3 | G3 | C3 |
+2 lh.clef | bass | _ | _ | _ |

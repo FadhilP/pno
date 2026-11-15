@@ -1,0 +1,17 @@
+@ format=1
+
+1 tempo | "rit." | - | - | - |
+1 rh    | C5 | D5 | E5 | F5 |
+1 lh    | R |
+
+2 tempo | "a tempo"q=72 | _ | _ | _ |
+2 rh    | G5 | - | - | - |
+2 lh    | R |
+
+3 tempo | "poco meno"=94.9998 | _ | _ | _ |
+3 rh    | A5 | - | - | - |
+3 lh    | R |
+
+4 tempo | "Andante"_e=110 | _ | _ | _e.=40 |
+4 rh    | B5 | - | - | - |
+4 lh    | R |
