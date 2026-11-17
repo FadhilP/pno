@@ -8,6 +8,9 @@ use crate::render::temp_path;
 const POLYPHONY: &str = "256";
 // The loudest sample of an export: -1 dBFS.
 const PEAK: f64 = 29_204.0;
+// After the gain, the end is cut where no sample is above this level (-72 dBFS), plus a margin.
+const SILENT: i16 = 8;
+const MARGIN_SECONDS: f64 = 0.05;
 
 fn program(env: &str, name: &str) -> PathBuf {
     std::env::var_os(env).map_or_else(|| PathBuf::from(name), PathBuf::from)
@@ -95,15 +98,16 @@ pub fn render(midi: &[u8], sound: &Path, out: &Path) -> Result<(), String> {
 }
 
 // sfizz writes the level of the samples; Salamander is recorded with much headroom.
-// The gain brings the loudest sample to PEAK and keeps the dynamics.
+// The gain brings the loudest sample to PEAK and keeps the dynamics. The silence at the end
+// is cut.
 fn normalize(wav: &Path) -> Result<(), String> {
     let cannot = |e: std::io::Error| format!("cannot change {}: {e}", wav.display());
     let mut bytes = std::fs::read(wav).map_err(cannot)?;
-    let Some((start, len)) = pcm16_data(&bytes) else {
+    let Some(pcm) = pcm16_data(&bytes) else {
         return Err(format!("{} is not 16-bit PCM WAV", wav.display()));
     };
-    let end = (start + len).min(bytes.len());
-    let data = &mut bytes[start..end];
+    let end = (pcm.start + pcm.len).min(bytes.len());
+    let data = &mut bytes[pcm.start..end];
     let sample = |c: &[u8]| f64::from(i16::from_le_bytes([c[0], c[1]]));
     let peak = data
         .chunks_exact(2)
@@ -117,29 +121,59 @@ fn normalize(wav: &Path) -> Result<(), String> {
         let v = (sample(c) * gain).round().clamp(-32_768.0, 32_767.0) as i16;
         c.copy_from_slice(&v.to_le_bytes());
     }
+    let data_is_last = end == bytes.len();
+    if data_is_last && pcm.frame > 0 {
+        let sound = bytes[pcm.start..end]
+            .chunks_exact(2)
+            .rposition(|c| i16::from_le_bytes([c[0], c[1]]).unsigned_abs() > SILENT.unsigned_abs());
+        let margin = (f64::from(pcm.rate) * MARGIN_SECONDS) as usize * pcm.frame;
+        let keep = sound.map_or(0, |i| (i * 2 / pcm.frame + 1) * pcm.frame) + margin;
+        let keep = keep.min(end - pcm.start);
+        bytes.truncate(pcm.start + keep);
+        let riff = (bytes.len() - 8) as u32;
+        bytes[4..8].copy_from_slice(&riff.to_le_bytes());
+        bytes[pcm.start - 4..pcm.start].copy_from_slice(&(keep as u32).to_le_bytes());
+    }
     std::fs::write(wav, bytes).map_err(cannot)
 }
 
-// The start and length of the data chunk, if the format chunk is 16-bit PCM.
-fn pcm16_data(b: &[u8]) -> Option<(usize, usize)> {
+struct Pcm {
+    start: usize,
+    len: usize,
+    // Bytes of one sample of all channels.
+    frame: usize,
+    rate: u32,
+}
+
+// The data chunk, if the format chunk is 16-bit PCM.
+fn pcm16_data(b: &[u8]) -> Option<Pcm> {
     if b.get(..4)? != b"RIFF" || b.get(8..12)? != b"WAVE" {
         return None;
     }
     let mut i = 12;
-    let mut pcm16 = false;
+    let mut format: Option<(u32, usize)> = None;
+    let u16_at = |at: usize| -> Option<u16> {
+        Some(u16::from_le_bytes(b.get(at..at + 2)?.try_into().ok()?))
+    };
     while i + 8 <= b.len() {
         let id = &b[i..i + 4];
         let len = u32::from_le_bytes(b[i + 4..i + 8].try_into().ok()?) as usize;
         let body = i + 8;
         if id == b"fmt " {
-            let format = u16::from_le_bytes(b.get(body..body + 2)?.try_into().ok()?);
-            let bits = u16::from_le_bytes(b.get(body + 14..body + 16)?.try_into().ok()?);
-            pcm16 = format == 1 && bits == 16;
+            let pcm16 = u16_at(body)? == 1 && u16_at(body + 14)? == 16;
+            let rate = u32::from_le_bytes(b.get(body + 4..body + 8)?.try_into().ok()?);
+            format = pcm16.then_some((rate, usize::from(u16_at(body + 12)?)));
         }
         if id == b"data" {
-            return pcm16.then_some((body, len));
+            let (rate, frame) = format?;
+            return Some(Pcm {
+                start: body,
+                len,
+                frame,
+                rate,
+            });
         }
-        i = body + len + len % 2;
+        i = body.checked_add(len)?.checked_add(len % 2)?;
     }
     None
 }

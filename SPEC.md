@@ -84,6 +84,7 @@ A `-` run with an invalid length is an error, so the writer must put the tie at 
 | `rh.hp`, `lh.hp` | Hairpins of that staff: `<` or `>` at the start, `-` while it continues. Default placement: below the staff. |
 | `rh.txt`, `lh.txt` | Text expressions of that staff. Default placement: above for `rh`, below for `lh`. |
 | `tempo` | Tempo marks, above the upper staff. |
+| `phrase` | Phrase marks of the two staves, for playback: `/` starts a phrase, `//` starts a section (a phrase of phrases), `breath` and `caesura` start a phrase and are drawn. Section 3.5 gives the details. |
 | `rh.clef`, `lh.clef` | Clef changes, also in the middle of a bar. |
 | `rh.8va`, `lh.8va` | Ottava lines. |
 | `@` | Attributes, not a grid: `key=`, `time=`, `barline=`, `volta=`, `break=` and others. Without a bar number they are the score header. Section 3.8 gives the list and the range of each attribute. |
@@ -136,11 +137,26 @@ Playback data uses the same rule as presentation: the file stores a value only w
   - A dynamic mark with no velocity in the source has the table velocity, and a note with no velocity of its own has the level of that mark. The import report gives the count.
   - A file with no such block (from a different program, or if a program removed the block; the levels cannot return then): the import uses a fixed rule. A mark velocity that differs from the table becomes a `vel.` line at that bar. If more than half of the notes of a lane have the same offset, that offset becomes the `vel.` line of the lane in its first bar. The sound is exact; only the division between the levels can differ from a file that a person wrote.
 
+**Phrases.** The `phrase` lane gives the phrases that `pno export --phrase` shapes: `5 phrase | _ / | _ |` starts a phrase on the second eighth of bar 5 in 2/4. Each mark starts a phrase, and the phrase ends at the next mark or at the end of the score; the start of the score also starts a phrase.
+
+| Mark | Starts | Drawn |
+|---|---|---|
+| `/` | A phrase | No |
+| `//` | A phrase and a section | No |
+| `breath` | A phrase | A breath mark after the note that ends at its time |
+| `caesura` | A phrase | A caesura after the note that ends at its time |
+
+- A `breath` or `caesura` is drawn on the note that ends at its time, in the first voice lane in canonical order that has one. If no note ends there, it is an error. A mark at the start of a bar is drawn on the last note of the bar before.
+- **Sound with `--phrase`:** each phrase has an arch of velocity (6 softer at its ends, 6 louder at 60 % of its length) and of tempo (1 % slower at its start, 1 % faster at its peak, 3 % slower at its end). A section adds half of its own arch. `--phrase=AMOUNT` multiplies the two arches (above 0, at most 4).
+- **Sound with or without `--phrase`:** before a `breath` the last 32nd is held at half the tempo, and before a `caesura` the last 16th at a quarter of the tempo; the note before the mark ends where the hold starts. A fermata on a barline holds the last quarter of the bar at half the tempo.
+- With no `phrase` line in the score, `--phrase` finds the phrases from slurs and bar groups. `pno phrase FILE` writes the phrases that it finds as `/` marks, and `//` where a section ends, to correct them.
+- **Round trip:** the export writes `breath` and `caesura` as `<breath-mark/>` and `<caesura/>` in the `<articulations>` of the note. It writes `/` and `//` as `<miscellaneous>` fields `pno-phrase-1`, `pno-phrase-2`, … with the value `<bar index> <time in the bar> <mark>`, for example `4 1/8 /`; the bar index counts from 0 and the time includes the `x` time. The import reads both back.
+
 **Other playback data:**
 
 | Data | Syntax | Default (not stored) |
 |---|---|---|
-| Tempo in beats per minute | In the `tempo` lane: `"Andante"=72` | The number in the metronome mark. |
+| Tempo in beats per minute | In the `tempo` lane: `"Andante"=72` | The number in the metronome mark. The words "rit.", "ritard.", "riten.", "rall.", "allarg." and "slentando" go to 75 % of the tempo over their length, "accel." and "string." to 120 % ("poco" halves the change, "molto" makes it 1.6 times); "a tempo" or a metronome mark ends the change, and "Tempo I" goes back to the first metronome mark. The export reads them in the `tempo` and `txt` lanes. |
 | Attack and release offset of one note | Suffix on that pitch: `C4^a-20^r+15` | No offset: the note starts and ends where the notation says. |
 | MIDI program, volume, pan | Header: `@ program=`, `@ volume=`, `@ pan=` | Piano, with the default volume and pan. |
 
@@ -389,4 +405,4 @@ A dynamic mark with text, a trill with a flat, a turn between two notes:
 
 ## 3.12 Not in version 1
 
-The list of marks and tokens in section 3 is closed. For each other element the import stops and names it. Known cases: multi-bar rests, lyrics, more than four voices on a staff, more than two staves, glissando lines, half pedal and other pedal types (sostenuto and una corda are possible as text), finger substitution, notehead shapes and parentheses on a notehead, key signatures that are not standard, metric modulation marks, an accidental sign in square brackets, a tuplet across a barline, a clef with an octave number, a bracket for chords that are not arpeggios, breath and caesura marks, rehearsal marks, and a note shorter than a 128th. The second format review found each of these in at most 2 % of 235 piano scores. A corpus run of 2026-11-15 found more: dots that are not shown, ornaments with an approach or departure note, a playback dynamic level with no mark, a dynamic text next to a dynamic mark in one element, a mark at a time that no slot or group shows, pedal lines that overlap, a tie to a later note in another voice, a tie into another voice with two possible start notes, a bar that is longer than its time signature by a part of a beat, and a tuplet whose rounded lengths do not add up.
+The list of marks and tokens in section 3 is closed. For each other element the import stops and names it. Known cases: multi-bar rests, lyrics, more than four voices on a staff, more than two staves, glissando lines, half pedal and other pedal types (sostenuto and una corda are possible as text), finger substitution, notehead shapes and parentheses on a notehead, key signatures that are not standard, metric modulation marks, an accidental sign in square brackets, a tuplet across a barline, a clef with an octave number, a bracket for chords that are not arpeggios, rehearsal marks, and a note shorter than a 128th. The second format review found each of these in at most 2 % of 235 piano scores. A corpus run of 2026-11-15 found more: dots that are not shown, ornaments with an approach or departure note, a playback dynamic level with no mark, a dynamic text next to a dynamic mark in one element, a mark at a time that no slot or group shows, pedal lines that overlap, a tie to a later note in another voice, a tie into another voice with two possible start notes, a bar that is longer than its time signature by a part of a beat, and a tuplet whose rounded lengths do not add up.

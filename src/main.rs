@@ -63,12 +63,15 @@ enum Cmd {
         /// The seed of --humanize; the same seed gives the same performance
         #[arg(long, requires = "humanize")]
         seed: Option<u64>,
-        /// MIDI and audio: shape each phrase with a curve of tempo and velocity
-        #[arg(long)]
-        phrase: bool,
+        /// MIDI and audio: shape each phrase with a curve of tempo and velocity; AMOUNT scales the curve (1 if not given, at most 4)
+        #[arg(long, num_args = 0..=1, default_missing_value = "1", value_name = "AMOUNT")]
+        phrase: Option<f64>,
         /// Audio: play the MIDI with this SFZ instrument through sfizz, not with MuseScore
         #[arg(long)]
         sound: Option<PathBuf>,
+        /// MIDI and audio: play only a bar range, for example 9-14
+        #[arg(long)]
+        bars: Option<String>,
     },
     /// Read MusicXML into a pno file; .mxl and .mscz go through MuseScore
     Import {
@@ -128,6 +131,8 @@ enum Cmd {
         /// Bar range, for example 9-10
         bars: Option<String>,
     },
+    /// Write the phrases that `export --phrase` finds as `/` marks in phrase lines, to correct them; the file must be formatted, pass check and have no phrase lines
+    Phrase { file: PathBuf },
     /// Print the list of format sections, or one section, for example `pno spec 3.7`
     Spec { section: Option<String> },
 }
@@ -468,6 +473,7 @@ fn run(cmd: Cmd) -> Result<(), Failure> {
             seed,
             phrase,
             sound,
+            bars,
         } => {
             let score = checked(&file)?;
             let a = analysis::Analysis::new(&score);
@@ -480,9 +486,10 @@ fn run(cmd: Cmd) -> Result<(), Failure> {
                 ext.as_str(),
                 "mid" | "midi" | "wav" | "mp3" | "flac" | "ogg"
             );
-            if !played && (humanize || phrase || sound.is_some()) {
+            let options = humanize || phrase.is_some() || sound.is_some() || bars.is_some();
+            if !played && options {
                 return Err(usage(
-                    "--humanize, --phrase and --sound apply only to MIDI and audio output",
+                    "--humanize, --phrase, --sound and --bars apply only to MIDI and audio output",
                 ));
             }
             let is_midi = matches!(ext.as_str(), "mid" | "midi");
@@ -499,12 +506,23 @@ fn run(cmd: Cmd) -> Result<(), Failure> {
                         perform::Humanize::Seed(s)
                     }
                 };
-                let shaping = if phrase {
-                    perform::Shaping::Phrases
-                } else {
-                    perform::Shaping::Off
+                let shaping = match phrase {
+                    None => perform::Shaping::Off,
+                    Some(f) if f > 0.0 && f <= 4.0 => perform::Shaping::Phrases(f),
+                    Some(_) => return Err(usage("--phrase AMOUNT is above 0 and at most 4")),
                 };
-                let bytes = midi::write(&perform::perform(&a, mode, shaping));
+                let opts = perform::Options {
+                    humanize: mode,
+                    shaping,
+                    bars: bars.map(|b| bar_range(&score, &b)).transpose()?,
+                    tail: if sound.is_some() {
+                        perform::Tail::Release
+                    } else {
+                        perform::Tail::None
+                    },
+                };
+                let p = perform::perform(&a, &opts).map_err(|msg| Failure { code: 1, msg })?;
+                let bytes = midi::write(&p);
                 match &sound {
                     Some(sfz) => {
                         audio::render(&bytes, sfz, &out).map_err(|e| Failure { code: 1, msg: e })?
@@ -515,9 +533,9 @@ fn run(cmd: Cmd) -> Result<(), Failure> {
                 println!("wrote {}", out.display());
                 return Ok(());
             }
-            if humanize || phrase {
+            if humanize || phrase.is_some() || bars.is_some() {
                 return Err(usage(
-                    "--humanize and --phrase need --sound for audio: MuseScore plays only the notation",
+                    "--humanize, --phrase and --bars need --sound for audio: MuseScore plays only the notation",
                 ));
             }
             let xml = musicxml::export(&a, musicxml::Scope::Full)
@@ -675,6 +693,22 @@ fn run(cmd: Cmd) -> Result<(), Failure> {
                 .map_err(|e| usage(format!("cannot read {}: {e}", file.display())))?;
             print_changed_lines(&old, &new);
             Ok(())
+        }
+        Cmd::Phrase { file } => {
+            let mut score = editable(&file)?;
+            let found = edit::add_phrases(&mut score).map_err(|msg| Failure { code: 1, msg })?;
+            for p in &found {
+                let bar = &score.bars[p.bar];
+                let cell = bar.layout.cell_at(p.time) + 1;
+                println!(
+                    "{} cell {cell}: {} ({})",
+                    bar.label,
+                    p.mark.text(),
+                    p.reason.text()
+                );
+            }
+            println!("marked {} phrases", found.len());
+            save(&file, score)
         }
         Cmd::Spec { section } => spec(section.as_deref()),
     }

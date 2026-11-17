@@ -5,8 +5,8 @@ use crate::frac::{Frac, NoteValue};
 use crate::model::{
     AccDisplay, ArpKind, Articulation, Attr, BarStyle, BracketEnd, Break, Clef, Dyn, DynMark,
     DynText, Hairpin, Jump, Key, MetaField, Meter, Metronome, Mode, OrnamentKind, Ottava,
-    PedalStyle, Pitch, PitchMark, Place, Sign, Staff, Tempo, TempoMark, Text, TimeSymbol, TokMark,
-    TupletLook,
+    PedalStyle, PhraseMark, Pitch, PitchMark, Place, Sign, Staff, Tempo, TempoMark, Text,
+    TimeSymbol, TokMark, TupletLook,
 };
 
 const POSITION_ATTRS: [&str; 12] = [
@@ -107,6 +107,7 @@ pub struct SrcNote {
     pub stem: Option<TokMark>,
     pub velocity: Option<f64>,
     pub small: bool,
+    pub pause: Option<PhraseMark>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -185,6 +186,8 @@ pub struct Source {
     page_height: Option<f64>,
     page_texts: Vec<(TextPlace, String)>,
     pub vel_lines: Vec<String>,
+    // (bar index, time in the bar, mark)
+    pub phrase_marks: Vec<(usize, Frac, PhraseMark)>,
     pub program: Option<u32>,
     pub volume: Option<f64>,
     pub pan: Option<f64>,
@@ -251,6 +254,20 @@ fn place_page_texts(src: &mut Source, rep: &mut Report) {
     for (f, texts) in joined {
         push_meta(src, rep, f, texts.join("\n"));
     }
+}
+
+fn phrase_field(text: &str) -> Option<(usize, Frac, PhraseMark)> {
+    let mut parts = text.split_whitespace();
+    let bar = parts.next()?.parse().ok()?;
+    let t = parts.next()?;
+    let (num, den) = t.split_once('/').unwrap_or((t, "1"));
+    let num: i64 = num.parse().ok()?;
+    let den: i64 = den.parse().ok().filter(|d: &i64| *d > 0)?;
+    let mark = PhraseMark::parse(parts.next()?).filter(|m| !m.is_drawn())?;
+    parts
+        .next()
+        .is_none()
+        .then_some((bar, Frac::new(num, den), mark))
 }
 
 fn vel_field_number(f: Node) -> Option<u32> {
@@ -452,6 +469,16 @@ fn identification(r: &mut Reader, n: Node, src: &mut Source) -> Result<(), Strin
             "miscellaneous" => {
                 let mut lines: Vec<(u32, String)> = Vec::new();
                 for f in kids(c) {
+                    let is_phrase = f
+                        .attribute("name")
+                        .is_some_and(|n| n.starts_with("pno-phrase-"));
+                    if is_phrase {
+                        match phrase_field(&text_of(f)) {
+                            Some(m) => src.phrase_marks.push(m),
+                            None => r.rep.drop(Row::Metadata),
+                        }
+                        continue;
+                    }
                     match vel_field_number(f) {
                         Some(n) => lines.push((n, text_of(f))),
                         None => r.rep.drop(Row::Metadata),
@@ -997,6 +1024,7 @@ fn read_note(r: &mut Reader, e: Node, div: i64, cur: &mut Cursor) -> Result<SrcN
         stem: None,
         velocity: None,
         small: false,
+        pause: None,
     };
     if let Some(v) = e.attribute("dynamics") {
         let pct: f64 = v
@@ -1338,8 +1366,22 @@ fn notations(r: &mut Reader, n: Node, note: &mut SrcNote) -> Result<(), String> 
                         "accent" => &[Articulation::Accent],
                         "strong-accent" => &[Articulation::Marcato],
                         "detached-legato" => &[Articulation::Staccato, Articulation::Tenuto],
-                        "breath-mark" => return Err(r.stop("a breath mark")),
-                        "caesura" => return Err(r.stop("a caesura")),
+                        "breath-mark" | "caesura" if matches!(note.head, SrcHead::Rest) => {
+                            r.rep.note(format!(
+                                "measure {}: a {} on a rest is dropped",
+                                r.measure,
+                                a.tag_name().name()
+                            ));
+                            &[]
+                        }
+                        "breath-mark" => {
+                            note.pause = Some(PhraseMark::Breath);
+                            &[]
+                        }
+                        "caesura" => {
+                            note.pause = Some(PhraseMark::Caesura);
+                            &[]
+                        }
                         other => return Err(r.stop(&format!("the articulation {other}"))),
                     };
                     for m in marks {

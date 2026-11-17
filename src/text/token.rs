@@ -1,7 +1,7 @@
 use crate::model::{
     AccDisplay, ArpKind, Articulation, Clef, Dyn, DynMark, DynText, Event, Grace, GraceNote,
-    Hairpin, Head, Lane, MarkKind, Metronome, Note, OrnamentKind, Ottava, Pedal, Pitch, PitchMark,
-    Place, SlurStart, Slurs, Staff, Tempo, TempoMark, Text, Tok, TokMark,
+    Hairpin, Head, Lane, MarkKind, Metronome, Note, OrnamentKind, Ottava, Pedal, PhraseMark, Pitch,
+    PitchMark, Place, SlurStart, Slurs, Staff, Tempo, TempoMark, Text, Tok, TokMark,
 };
 
 #[derive(Debug)]
@@ -25,6 +25,9 @@ pub fn parse_word(lane: Lane, w: &str) -> Result<Word, String> {
             _ => return Err(format!("`{w}` is not a pedal mark. Use P, C, - or _")),
         },
         Lane::Tempo => Tok::Tempo(parse_tempo(w)?),
+        Lane::Phrase => Tok::Phrase(PhraseMark::parse(w).ok_or_else(|| {
+            format!("`{w}` is not a phrase mark. Use /, //, breath, caesura or _")
+        })?),
         Lane::Mark(_, kind, _) => match kind {
             MarkKind::Dyn => parse_dyn(w)?,
             MarkKind::Hairpin => {
@@ -162,7 +165,7 @@ fn parse_tempo(w: &str) -> Result<Tempo, String> {
     let mark = if rest.is_empty() {
         None
     } else if let Some(n) = rest.strip_prefix('=') {
-        Some(TempoMark::Sound(parse_number(n)?))
+        Some(TempoMark::Sound(parse_tempo_number(n)?))
     } else if let Some(m) = rest.strip_prefix('_') {
         Some(TempoMark::hidden(parse_metronome(m)?))
     } else if let Some(inner) = rest.strip_prefix('(').and_then(|r| r.strip_suffix(')')) {
@@ -203,8 +206,15 @@ fn parse_metronome(s: &str) -> Result<Metronome, String> {
     Ok(Metronome {
         unit,
         dotted,
-        bpm: parse_number(n)?,
+        bpm: parse_tempo_number(n)?,
     })
+}
+
+fn parse_tempo_number(s: &str) -> Result<f64, String> {
+    match parse_number(s)? {
+        v if v > 0.0 => Ok(v),
+        _ => Err("a tempo needs a number above 0".into()),
+    }
 }
 
 fn parse_number(s: &str) -> Result<f64, String> {

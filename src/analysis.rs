@@ -4,7 +4,7 @@ use crate::diag::Diag;
 use crate::frac::{Frac, NoteValue};
 use crate::model::{
     Attr, El, ElKind, Event, GroupHead, Head, Key, Lane, MarkKind, Note, Ottava, Pedal, PedalStyle,
-    Pitch, PitchMark, Place, Score, Staff, Tok, TupletLook,
+    PhraseMark, Pitch, PitchMark, Place, Score, Staff, Tok, TupletLook,
 };
 use crate::text::write::default_ratio;
 
@@ -107,6 +107,8 @@ pub struct Analysis<'a> {
     pub pedals: Vec<PedalEvent>,
     pub pedal_style: PedalStyle,
     pub signs: HashSet<NoteRef>,
+    // The leaf that a breath mark or caesura is drawn after.
+    pub pauses: HashMap<usize, PhraseMark>,
     pub diags: Vec<Diag>,
 }
 
@@ -162,6 +164,7 @@ impl<'a> Analysis<'a> {
             pedals: Vec::new(),
             pedal_style: PedalStyle::Line,
             signs: HashSet::new(),
+            pauses: HashMap::new(),
             diags: Vec::new(),
         };
         a.bar_info();
@@ -171,8 +174,46 @@ impl<'a> Analysis<'a> {
         a.pair_slurs();
         a.collect_spans();
         a.collect_pedals();
+        a.collect_pauses();
         a.signs = crate::accidental::default_signs(&a);
         a
+    }
+
+    // The first voice in lane order with a note that ends at the mark gets it.
+    fn collect_pauses(&mut self) {
+        let score = self.score;
+        for (b, bar) in score.bars.iter().enumerate() {
+            for line in bar.lines.iter().filter(|l| l.lane == Lane::Phrase) {
+                for (start, _, tok) in flatten(&line.els) {
+                    let Tok::Phrase(mark) = tok else { continue };
+                    if !mark.is_drawn() {
+                        continue;
+                    }
+                    let at = self.abs(b, start);
+                    let leaf = self
+                        .leaves
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, l)| l.event().is_some_and(|ev| !ev.notes().is_empty()))
+                        .filter(|(_, l)| self.abs(l.bar, l.end()) == at)
+                        .min_by_key(|(_, l)| l.lane.order())
+                        .map(|(i, _)| i);
+                    match leaf {
+                        Some(i) => {
+                            self.pauses.insert(i, *mark);
+                        }
+                        None => self.error(
+                            line.src,
+                            format!("{} phrase", bar.label),
+                            format!(
+                                "no note ends at this {}; it is drawn after the note that ends at its time",
+                                mark.text()
+                            ),
+                        ),
+                    }
+                }
+            }
+        }
     }
 
     pub fn abs(&self, bar: usize, t: Frac) -> Frac {

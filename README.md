@@ -1,6 +1,8 @@
 # pno
 
-A text format for piano scores, and a CLI for it. An AI agent can read and edit a `pno` file directly, with few tokens and no arithmetic. The CLI checks, formats, converts, renders and analyzes the files. MuseScore 4 draws the pages.
+A text format for piano scores and their performance, and a CLI for it. A `pno` file holds the notation and the playback data: velocities, tempo, pedal, the timing of single notes and the phrases. An AI agent can read and edit it directly, with few tokens and no arithmetic.
+
+The CLI checks, formats, converts, renders and analyzes the files, and plays them: it writes MIDI, and audio with an SFZ piano. MuseScore 4 draws the pages.
 
 The first bars of Chopin's Étude Op. 10 No. 3 ("Tristesse"):
 
@@ -41,6 +43,35 @@ The first bars of Chopin's Étude Op. 10 No. 3 ("Tristesse"):
 
 The full format is in [SPEC.md](SPEC.md). `pno spec` prints it one section at a time.
 
+## Playback
+
+The file stores playback data only where it differs from what the notation implies (SPEC section 3.5):
+
+```
+@ vel.p=52
+4 @ vel.rh2=-15
+
+9 phrase | / | _ | _ breath | _ |
+9 rh     | E5:v+8 C5^a-20 | ...
+```
+
+- `vel.p=52` sets the velocity of each `p` mark, and `vel.rh2=-15` is an offset for the voice `rh2` from bar 4.
+- `:v+8` is a note offset; `^a-20` starts a note 20 ticks early.
+- In the `phrase` lane, `/` starts a phrase, and a drawn breath mark starts the next one.
+
+`pno export` plays the score:
+
+- **MIDI** (`.mid`) directly, with a track for each staff (`rh`, `lh`). Repeats, voltas and jumps are played out, ties are joined, and ornaments, grace notes, arpeggios, tremolos, fermatas, articulations, the pedal and the tempo are played.
+  - Grace notes with a slash, and groups of grace notes, end on the beat. One grace note with no slash is an appoggiatura: it is on the beat, with half the value of its note, at most a quarter.
+  - An arpeggio ends on the beat. The voices of one staff roll as one arpeggio.
+  - A trill ends on its main note; an ornament on a chord is on its top note.
+  - The tempo words "rit.", "ritard.", "riten.", "rall.", "allarg.", "slentando", "accel." and "string." (with "poco" or "molto"), "a tempo" and "Tempo I" change the tempo, in the `tempo` and `txt` lanes.
+  - A breath mark, a caesura and a fermata on a barline make a short pause.
+- **Audio** (`.wav`, `.mp3`, `.flac`, `.ogg`) with `--sound piano.sfz`: the same MIDI through sfizz, with 4 s for the release sound. The loudest point is at -1 dBFS, and the silence at the end is cut. Without `--sound`, MuseScore plays only the notation.
+- **`--bars 9-14`** plays only those bars, with the tempo in effect there.
+- **`--humanize`** adds small changes of timing and velocity, plays the melody (the top note of `rh`) a little earlier and louder than the other notes, and ends the piece with a ritardando if no slower tempo is in effect there. It prints its seed; `--seed N` repeats a performance.
+- **`--phrase`** shapes each phrase: softer and a little slower at its start, louder and a little faster near its middle, and slowest at its end (3 % slower). `--phrase=2` doubles the curve; use more with phrase marks that you checked. A `//` mark starts a section, whose arch adds half of its value to the phrase arch. With no `phrase` line, pno finds the phrases from slurs of two bars or longer in `rh`, and else from groups of 2 to 8 bars (4 if no end is stronger) that end at a section end, a rest, a long note, a bass on the tonic or where an earlier theme comes back. A phrase starts at its upbeat. `pno phrase score.pno` writes the phrases that it finds into the file, with `//` at section ends, and prints why each starts, so you can correct them.
+
 ## Install
 
 ```sh
@@ -69,11 +100,12 @@ pno export score.pno out.mp3 --sound piano.sfz --humanize --phrase
 | `check FILE [BARS]` | Syntax, bar fill, note values, ties and open spans. Each error gives the bar, lane and cell, and most give a correction. |
 | `fmt FILE [--fix] [--check]` | Writes the canonical form, then checks. `--fix` splits invalid `-` runs and renumbers the bars. |
 | `import FILE [-o OUT] [--keep stems,beams]` | MusicXML (and `.mxl`, `.mscz`) to `pno`, with a report of each dropped element. |
-| `export FILE OUT [--humanize [--seed N]] [--phrase] [--sound SFZ]` | MusicXML and MIDI directly; PDF, PNG and SVG through MuseScore. Audio through MuseScore, or with `--sound` through sfizz with an SFZ instrument (`.wav`, and `.mp3`, `.flac`, `.ogg` through ffmpeg); its loudest point is at -1 dBFS. `--humanize` plays MIDI and `--sound` audio with small changes of timing and velocity; the same seed gives the same result. `--phrase` shapes each phrase: softer and slower at its ends, louder and up to 2 % faster near its middle. |
+| `export FILE OUT [--humanize [--seed N]] [--phrase[=AMOUNT]] [--sound SFZ] [--bars B]` | MusicXML and MIDI directly; PDF, PNG and SVG through MuseScore. Audio through MuseScore, or with `--sound` through sfizz (`.wav`, and `.mp3`, `.flac`, `.ogg` through ffmpeg). See [Playback](#playback). |
 | `render FILE [BARS] [-o OUT] [--dpi N]` | A trimmed PNG of a bar range or of the score. |
 | `sound FILE [BARS] [--pedal]` | The pitches that sound at each onset, with held notes and the pedal. |
 | `analyze FILE [BARS] [--all]` | The chord of each beat, dissonances between the hands, repeated bars. |
 | `set FILE LINE...` | Replaces lines by bar and lane, or adds a lane to a bar. |
+| `phrase FILE` | Writes the phrases that `--phrase` finds as `/` and `//` marks, and prints why each starts. |
 | `bars insert\|delete\|copy`, `transpose` | Structural edits that are error-prone as text edits. |
 | `spec [SECTION]` | Prints the format reference, for example `pno spec 3.7`. |
 
@@ -90,16 +122,16 @@ The editing commands write the file only if the result passes `check`.
 | Rounded tuplets | The import reads exact note lengths, but directions, clefs and grace notes keep the rounded position of the source. |
 | MuseScore | MuseScore 4 does not read a tie into another voice. |
 | Not an engraver | `render` and PDF export need MuseScore. |
-| Playback | The MIDI and `--sound` export play the stored velocities and tempo marks. A hairpin changes the sound only through the note velocities in the file (SPEC section 3.5). With `--humanize`, the words "rit.", "rall.", "accel." and "a tempo" (in the `tempo` and `txt` lanes) change the tempo, and the piece ends with a ritardando if the score has none there. `--phrase` finds the phrases from slurs of two bars or longer in `rh`, and else from groups of 2 to 8 bars that end at a section end, a rest, a long note or a bass on the tonic; there is no way to write phrases in the file. `--sound` reads SFZ, not SF2. |
+| Playback | A hairpin changes the sound only through the note velocities in the file. `--phrase` has two levels (phrase and section). The sizes of the pauses and of the phrase curve are not tuned by listening tests. `--sound` reads SFZ, not SF2. |
 
 ### Corpus coverage
 
-Measured on 2026-11-15. A round trip is import, then export, with the same music as the source.
+Measured on 2026-11-17. A round trip is import, then export, with the same music as the source.
 
 | Corpus | Files | Round trips | Named stops | Faults | Equal bars, all files | Equal bars, files that import |
 |---|---|---|---|---|---|---|
-| [ASAP](https://github.com/fosfrancesco/asap-dataset) (classical, Bach to Ravel) | 235 | 87 (37 %) | 113 | 33 | 37.5 % | 99.0 % |
-| PDMX (other styles) | 105 | 43 (41 %) | 57 | 5 | 46.9 % | 98.6 % |
+| [ASAP](https://github.com/fosfrancesco/asap-dataset) (classical, Bach to Ravel) | 235 | 86 (37 %) | 113 | 34 | 37.5 % | 99.0 % |
+| PDMX (other styles) | 105 | 44 (42 %) | 56 | 5 | 49.4 % | 98.7 % |
 
 - A named stop is a file with a feature that `pno` does not support yet. The import stops and names it. All bars of such a file count as not equal.
 - A fault is a file that imports but does not come back the same.

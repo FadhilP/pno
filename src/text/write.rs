@@ -344,6 +344,7 @@ pub fn tok_text(lane: Lane, t: &Tok) -> String {
         Tok::Empty => "_".into(),
         Tok::Gap => "x".into(),
         Tok::Cont => "-".into(),
+        Tok::Phrase(m) => m.text().into(),
         Tok::Event(ev) => event(ev),
         Tok::Pedal(Pedal::Press) => "P".into(),
         Tok::Pedal(Pedal::Change) => "C".into(),

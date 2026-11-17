@@ -746,7 +746,9 @@ fn extend(
             Tok::Tempo(_) => Err("`-` after a tempo mark needs a text: \"rit.\" - -"),
             Tok::Empty | Tok::Gap if lane.is_voice() => Err("`-` after `_` or `x`"),
             Tok::Empty | Tok::Gap => Err("`-` with no span to continue"),
-            Tok::Dyn(_) | Tok::DynText(_) | Tok::Clef(_) => Err("this lane has no `-`"),
+            Tok::Dyn(_) | Tok::DynText(_) | Tok::Clef(_) | Tok::Phrase(_) => {
+                Err("this lane has no `-`")
+            }
         },
     };
     ok.map_err(|m| (start, m.to_string()))?;

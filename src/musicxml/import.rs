@@ -5,7 +5,7 @@ mod report;
 
 use roxmltree::{Document, ParsingOptions};
 
-pub use build::Keep;
+pub use build::{Keep, with_x};
 
 pub struct Imported {
     pub text: String,

@@ -326,3 +326,28 @@ fn tuplet_lengths_that_the_divisions_round_import_exactly() {
     );
     assert!(diffs.is_empty(), "{}", diffs.join("\n"));
 }
+
+#[test]
+fn breath_marks_that_pno_cannot_place_are_dropped_with_a_note() {
+    let dir = temp_dir("import-breath");
+    let xml = dir.join("p.musicxml");
+    export(&root().join("tests/fixtures/spec/phrase.pno"), &xml);
+    let text = read(&xml);
+    let breath = "<notations>\n          <articulations>\n            <breath-mark/>\n          </articulations>\n        </notations>\n";
+    let rest = text.find("<rest/>").expect("a rest");
+    let rest_end = rest + text[rest..].find("</note>").expect("end of the rest");
+    let last_end = text.rfind("</note>").expect("a note");
+    let mut edited = text.clone();
+    edited.insert_str(last_end, breath);
+    edited.insert_str(rest_end, breath);
+    let xml = write(&dir, "edited.musicxml", &edited);
+    let out = dir.join("back.pno");
+    let run = import(&xml, &out, &[]);
+    assert_eq!(run.code, 0, "{}{}", run.stdout, run.stderr);
+    for line in [
+        "a breath-mark on a rest is dropped",
+        "a breath after the last note is dropped",
+    ] {
+        assert!(run.stdout.contains(line), "{line}\n{}", run.stdout);
+    }
+}

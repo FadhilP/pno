@@ -1,11 +1,11 @@
 ---
 name: audio-to-pno
-description: Transcribe or arrange a recording (mp3, wav, flac, m4a) into a piano score in the `pno` format. Use it when the user gives an audio file and wants piano notes, a piano arrangement, sheet music or a MIDI of it. Do not use it for MusicXML, .mxl or .mscz input, or to edit a score that exists; the `pno` skill does those.
+description: Transcribe or arrange a recording (mp3, wav, flac, m4a, webm, opus, ogg) into a piano score in the `pno` format. Use it when the user gives an audio file and wants piano notes, a piano arrangement, sheet music or a MIDI of it. Do not use it for MusicXML, .mxl or .mscz input, or to edit a score that exists; the `pno` skill does those.
 ---
 
 # audio-to-pno
 
-This skill gives evidence and checks. It does not convert audio to a score in one step: the models make many errors, and you decide each bar. Expect one long session for a 2-minute piece.
+This skill gives evidence and checks. It does not convert audio to a score in one step: the models make many errors, and you decide each bar.
 
 `a2p.py` supplies what you cannot get by ear: the notes two models hear, the bar grid, the loudness of any pitch through time, and a comparison of your score with the recording. Read the `pno` skill first; you write and edit the score with it.
 
@@ -26,15 +26,16 @@ The commands are for Bash. Shell variables do not stay between tool calls, so se
 
 ## Workflow
 
-### 1. Prepare (about 2 minutes on a CPU for a 100 s recording)
+### 1. Prepare
 
-`$A2P prepare song.mp3` writes `src.wav`, four stems, `pt.json` (piano model) and `bp.json` (sustained-note model).
+`$A2P prepare song.webm` writes `src.wav`, four stems, `pt.json` (piano model) and `bp.json` (sustained-note model). ffmpeg reads each audio format. Give it the file as the user downloaded it, and do not convert it first: each lossy encode removes detail. From YouTube, `yt-dlp -f bestaudio URL` gives the original Opus stream in a `.webm`; `--audio-format mp3` encodes it again.
 
 Read the report to learn what the recording is. Do not trust the title, and do not use notes, key or tempo that you remember for a song.
 
 - Stems: a drum or vocal stem near 0% means that part is absent. It does not mean solo piano.
 - "repeat a pitch within 0.25 s": a piano gives a low share. A high share (it was 32% for a recording with a tremolo lead and bass) means sustained or tremolo instruments, which the piano model hears as many short notes.
 - For a song with vocals, the melody is in the vocal stem: `$A2P bp vocals`, then `roll --extra bp_vocals`. This path is not tested.
+- Decide from these lines if the recording is solo piano. If you are not sure, ask the user. Step 4 depends on it.
 
 ### 2. Fix the grid before any note
 
@@ -69,6 +70,8 @@ Find the form first (which bars repeat), then the bass note and chord of each ba
 ### 4. Write the score
 
 Write `song.pno` with the `pno` skill: `@ key`, `@ time`, a tempo mark, `ped*`, then all bars. `pno fmt --fix` splits long notes into legal tied values.
+
+**Solo piano: stay true to the recording.** When the recording is solo piano, you transcribe; you do not arrange. Write what the pianist plays: the notes, voicing, register, figuration and hand split, with velocities that follow the loudness of the recording (the velocity syntax is under **Make the tune heard**). Do not add, remove or re-voice notes to make a better piece. Arrange only when the user asks for it. The rest of this step is for other recordings, and for a solo piano recording that the user asked you to arrange.
 
 You are the arranger. The recording fixes two things: the tune (pitches and rhythm) and the harmony (the bass note and chord of each bar). All else is your decision: texture, register, figuration, which hand plays what, how loud each voice is. The aim is a piece that a pianist would want to play and that a listener knows as the song. Do not copy all detected notes, and do not use one safe pattern for each bar.
 
@@ -106,6 +109,13 @@ You are the arranger. The recording fixes two things: the tune (pitches and rhyt
 
 **Stay honest to the recording.** Keep the tune and the bass as detected, and change them only on evidence (`peek`, a parallel bar). Take accompaniment notes from the chord of the bar, and prefer the chord notes that the models found: if a bar matches badly after you add notes, an added note is not in the chord of the recording. Record each liberty you take (a removed ornament, a moved octave, a new figure), because the report must list them.
 
+**Mark the phrasing.** The marks make the score easy to read, and the export plays them (`pno spec 3.7` has the syntax).
+
+- Slurs: put a slur over each phrase of the tune that you hear as one breath, usually 2 to 4 bars, and a short slur over a motif or a two-note sigh. A slur does not go over a rest or a clear break. `--phrase` takes a slur of two bars or longer in `rh` as a phrase.
+- Articulations: mark only what you can hear: `:st` for a short note, `:ten` for a held one, `:ac` for an accent. Do not mark each note.
+- Pedal: in the `ped` lane, change the pedal (`C`) where the harmony changes, and lift it where the recording is dry or the lines must stay clear.
+- Phrase marks: do not write a `phrase` line or run `pno phrase` unless the user asks for manual phrasing. Without that line, `--phrase` finds the phrases from the slurs, rests and cadences.
+
 ### 5. Compare with the recording
 
 `$A2P compare song.pno` exports the score through `pno` and prints three sections. Run it after each group of edits; it exports again each time.
@@ -122,7 +132,7 @@ MELODY is the only independent test of the tune. When it disagrees with the scor
 
 `$A2P check song.pno --song song.json` counts dead spots, left-hand leaps, spans larger than a tenth, right-hand jumps, crossed hands and different left-hand rhythms. With a song file it also lists melody notes that are absent, melody notes below another note, melody notes that are not louder than the other notes struck with them, parallel bars that differ, and notes outside the chords. It prints the velocity range of the score; a range of one value means that no voice has a level.
 
-The findings are places to look at, not rules. A crossing, a leap, a new figure or a tune below the top note is correct when you intended it. A melody note that is below another note or not louder than its accompaniment needs a velocity offset. Correct only what you did not intend.
+The findings are places to look at, not rules. A crossing, a leap, a new figure or a tune below the top note is correct when you intended it. A melody note that is below another note or not louder than its accompaniment needs a velocity offset. Correct only what you did not intend. In a solo piano transcription, a finding that matches the recording is correct.
 
 ```json
 {
@@ -142,12 +152,12 @@ Then render (`pno render song.pno -o work/page.png`) and look at the pages.
 The user judges by ear and by eye, so each version must reach them as files. After the first version, and after each pass that the user asks for, export the two files and confirm that their times changed:
 
 ```
-pno export song.pno song.mid         # to listen
+pno export song.pno song.mid --humanize --phrase   # to listen
 pno export song.pno song.musicxml    # to open in a notation program
 ls -l song.mid song.musicxml
 ```
 
-If a file time did not change, a program has the file open: export to a new name and tell the user. Do not finish a pass without the two exports, also when the user did not ask for them again.
+`--humanize` prints its seed; give it to the user, and use `--seed N` to export the same performance again. Use `--phrase` with no amount: a larger amount is for phrase marks that the user wrote. If a file time did not change, a program has the file open: export to a new name and tell the user. Do not finish a pass without the two exports, also when the user did not ask for them again.
 
 Before a pass, copy the score (`cp song.pno work/v1.pno`, then `v2`, ...), so that the user can go back. Run `check` on the copy and on the new version to get a before and after table. After the pass, `diff` the `rh` lines against the copy: a re-voicing pass can remove a melody correction from an earlier pass without any check failing. If the pass moves the tune, keep the melody list of the copy and run `check` with it one time: it shows which melody notes moved.
 
@@ -170,4 +180,4 @@ Give the user:
 
 ## Limits
 
-Tested on one recording: 99 s, 3/4, steady tempo, no drums, no vocals. Not tested: 4/4 and compound meters, a pickup, a vocal melody, a recording with drums, rubato. Tell the user when a song is outside the tested range.
+Tested on one recording: 3/4, steady tempo, no drums, no vocals. Not tested: 4/4 and compound meters, a pickup, a vocal melody, a recording with drums, rubato. Tell the user when a song is outside the tested range.

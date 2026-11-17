@@ -9,8 +9,8 @@ use crate::analysis::Part;
 use crate::frac::{Frac, NoteValue};
 use crate::model::{
     AccDisplay, Attr, Bar, BarLayout, DynMark, DynText, El, ElKind, Event, Grace, GraceNote,
-    GroupHead, Head, Key, Lane, Line, MarkKind, Meter, Note, Pedal, PedalStyle, PitchMark, Place,
-    Score, Slurs, Staff, Tok, TokMark,
+    GroupHead, Head, Key, Lane, Line, MarkKind, Meter, Note, Pedal, PedalStyle, PhraseMark,
+    PitchMark, Place, Score, Slurs, Staff, Tok, TokMark,
 };
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -609,7 +609,7 @@ fn fill_groups(els: Vec<El>) -> Vec<El> {
         .collect()
 }
 
-fn with_x(els: Vec<El>, layout: &BarLayout) -> Vec<El> {
+pub fn with_x(els: Vec<El>, layout: &BarLayout) -> Vec<El> {
     let mut out = Vec::new();
     if !layout.lead.is_zero() {
         out.push(El {
@@ -1130,6 +1130,69 @@ fn mark_lines(
     Ok(lines)
 }
 
+// A breath mark or caesura on a note starts a phrase at the end of the note; at the end
+// of the measure, in the next measure.
+fn phrase_line(
+    m: &SrcMeasure,
+    layout: &BarLayout,
+    bar: usize,
+    fields: &[(usize, Frac, PhraseMark)],
+    pause: &mut Option<PhraseMark>,
+    rep: &mut Report,
+) -> Option<Line> {
+    let lead = layout.lead;
+    let end = layout.total() - layout.trail;
+    let mut marks: BTreeMap<Frac, PhraseMark> = BTreeMap::new();
+    if let Some(p) = pause.take() {
+        marks.insert(lead, p);
+    }
+    for (_, t, p) in fields.iter().filter(|f| f.0 == bar) {
+        if lead <= *t && *t < end {
+            marks.insert(*t, *p);
+        } else {
+            rep.note(format!(
+                "measure {}: a phrase field outside the measure is dropped",
+                m.number
+            ));
+        }
+    }
+    for n in m.notes.iter().filter(|n| n.pause.is_some()) {
+        let Some(p) = n.pause else { continue };
+        if n.grace.is_some() {
+            rep.note(format!(
+                "measure {}: a {} on a grace note is dropped",
+                m.number,
+                p.text()
+            ));
+            continue;
+        }
+        let t = n.start + n.dur + lead;
+        if t >= end {
+            *pause = Some(p);
+        } else {
+            marks.insert(t, p);
+        }
+    }
+    let ends: Vec<Frac> = marks.keys().skip(1).copied().chain([end]).collect();
+    let els: Vec<El> = marks
+        .iter()
+        .zip(ends)
+        .map(|((t, p), next)| El {
+            start: *t,
+            dur: next - *t,
+            kind: ElKind::Tok(Tok::Phrase(*p)),
+        })
+        .collect();
+    if els.is_empty() {
+        return None;
+    }
+    Some(Line {
+        lane: Lane::Phrase,
+        src: 0,
+        els: with_x(els, layout),
+    })
+}
+
 // A mark for one moment ends at or before the next onset, so one slot of its cell holds the same notes.
 fn shorten_momentary(els: &mut [El], layout: &BarLayout) {
     let mut bounds = layout.cell_starts();
@@ -1302,6 +1365,7 @@ pub fn build(src: &Source, keep: Keep, rep: &mut Report) -> Result<Built, String
     let mut open: Vec<OpenSpan> = Vec::new();
     let mut pedal_held = false;
     let mut pedal_style = None;
+    let mut pause = None;
     let mut level = crate::analysis::DEFAULT_VELOCITY;
     let mut numbers = Vec::new();
     let mut rounded = Vec::new();
@@ -1389,6 +1453,14 @@ pub fn build(src: &Source, keep: Keep, rep: &mut Report) -> Result<Built, String
             bi,
             &mut marks_out,
         )?);
+        lines.extend(phrase_line(
+            m,
+            &layout,
+            bi,
+            &src.phrase_marks,
+            &mut pause,
+            cx.rep,
+        ));
         lines.push(pedal_line(m, &layout, &mut pedal_held, cx.rep)?);
         pedal_style = pedal_style.or(m.pedal_style);
         bars.push(Bar {
@@ -1407,6 +1479,20 @@ pub fn build(src: &Source, keep: Keep, rep: &mut Report) -> Result<Built, String
     if !open.is_empty() {
         cx.rep
             .note("a hairpin, dashed line or ottava with no end ends at the last bar".into());
+    }
+    if let Some(p) = pause {
+        cx.rep
+            .note(format!("a {} after the last note is dropped", p.text()));
+    }
+    let beyond = src
+        .phrase_marks
+        .iter()
+        .filter(|f| f.0 >= src.measures.len())
+        .count();
+    if beyond > 0 {
+        cx.rep.note(format!(
+            "{beyond} phrase fields after the last measure are dropped"
+        ));
     }
     if let Some(style) = pedal_style {
         header.push(Attr::PedalStyle(style));

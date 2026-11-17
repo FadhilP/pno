@@ -122,13 +122,50 @@ pub enum Tok {
     Tempo(Tempo),
     Clef(Clef),
     Ottava(Ottava),
+    Phrase(PhraseMark),
+}
+
+// Each mark starts a phrase. `Section` also starts a section, a phrase of phrases;
+// `Breath` and `Caesura` are drawn after the note that ends at their time.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PhraseMark {
+    Phrase,
+    Section,
+    Breath,
+    Caesura,
+}
+
+impl PhraseMark {
+    pub const ALL: [PhraseMark; 4] = [
+        PhraseMark::Phrase,
+        PhraseMark::Section,
+        PhraseMark::Breath,
+        PhraseMark::Caesura,
+    ];
+
+    pub fn text(self) -> &'static str {
+        match self {
+            PhraseMark::Phrase => "/",
+            PhraseMark::Section => "//",
+            PhraseMark::Breath => "breath",
+            PhraseMark::Caesura => "caesura",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<PhraseMark> {
+        PhraseMark::ALL.into_iter().find(|m| m.text() == s)
+    }
+
+    pub fn is_drawn(self) -> bool {
+        matches!(self, PhraseMark::Breath | PhraseMark::Caesura)
+    }
 }
 
 impl Tok {
     // A point token marks a moment; its slot length has no meaning.
     pub fn is_point(&self) -> bool {
         match self {
-            Tok::Clef(_) => true,
+            Tok::Clef(_) | Tok::Phrase(_) => true,
             Tok::Dyn(d) => !d.mark.is_momentary(),
             Tok::DynText(_) => true,
             Tok::Text(t) => !t.ext,
@@ -195,6 +232,7 @@ pub enum Lane {
     Ped,
     PedRule,
     Tempo,
+    Phrase,
     Mark(Staff, MarkKind, u8),
 }
 
@@ -204,6 +242,7 @@ impl Lane {
             "ped" => return Some(Lane::Ped),
             "ped*" => return Some(Lane::PedRule),
             "tempo" => return Some(Lane::Tempo),
+            "phrase" => return Some(Lane::Phrase),
             _ => {}
         }
         let staff = match s.get(..2)? {
@@ -243,7 +282,7 @@ impl Lane {
             Lane::Voice(s, _) | Lane::Mark(s, _, _) => Some(s),
             Lane::Ped => Some(Staff::Lower),
             Lane::Tempo => Some(Staff::Upper),
-            Lane::PedRule => None,
+            Lane::PedRule | Lane::Phrase => None,
         }
     }
 
@@ -257,7 +296,7 @@ impl Lane {
             Lane::Mark(_, k, _) => {
                 matches!(k, MarkKind::Ottava | MarkKind::Text | MarkKind::Hairpin)
             }
-            Lane::Voice(..) => false,
+            Lane::Voice(..) | Lane::Phrase => false,
         }
     }
 
@@ -265,6 +304,7 @@ impl Lane {
         match self {
             Lane::PedRule => (0, 0, 0),
             Lane::Tempo => (1, 0, 0),
+            Lane::Phrase => (1, 1, 0),
             Lane::Mark(Staff::Upper, k, n) => (2, k as u8, n),
             Lane::Voice(Staff::Upper, n) => (3, n, 0),
             Lane::Voice(Staff::Lower, n) => (4, n, 0),
@@ -282,6 +322,7 @@ impl std::fmt::Display for Lane {
             Lane::Ped => f.write_str("ped"),
             Lane::PedRule => f.write_str("ped*"),
             Lane::Tempo => f.write_str("tempo"),
+            Lane::Phrase => f.write_str("phrase"),
             Lane::Mark(s, k, 1) => write!(f, "{}.{}", s.name(), k.name()),
             Lane::Mark(s, k, n) => write!(f, "{}.{}{n}", s.name(), k.name()),
         }

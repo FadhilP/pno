@@ -5,6 +5,7 @@ use crate::model::{
     Attr, Bar, BarLayout, El, ElKind, Event, Head, Key, Lane, Line, MarkKind, Note, Pitch, Score,
     Slurs, Staff, Tok,
 };
+use crate::perform::DetectedPhrase;
 
 fn changes(bar: &Bar) -> Vec<String> {
     let attrs = bar
@@ -159,6 +160,44 @@ fn shift_key(k: &mut Key, shift: i32) -> Result<(), String> {
     }
     k.fifths = fifths as i8;
     Ok(())
+}
+
+// Writes the phrases that --phrase finds as marks, so that they can be corrected.
+pub fn add_phrases(score: &mut Score) -> Result<Vec<DetectedPhrase>, String> {
+    let has_marks = score
+        .bars
+        .iter()
+        .any(|b| b.lines.iter().any(|l| l.lane == Lane::Phrase));
+    if has_marks {
+        return Err("the score has phrase marks; delete its phrase lines first".into());
+    }
+    let found = crate::perform::detected_phrases(&crate::analysis::Analysis::new(score));
+    let mut by_bar: std::collections::BTreeMap<usize, Vec<&DetectedPhrase>> =
+        std::collections::BTreeMap::new();
+    for p in &found {
+        by_bar.entry(p.bar).or_default().push(p);
+    }
+    for (b, marks) in by_bar {
+        let layout = &score.bars[b].layout;
+        let end = layout.total() - layout.trail;
+        let ends = marks.iter().skip(1).map(|p| p.time).chain([end]);
+        let els: Vec<El> = marks
+            .iter()
+            .zip(ends)
+            .map(|(p, next)| El {
+                start: p.time,
+                dur: next - p.time,
+                kind: ElKind::Tok(Tok::Phrase(p.mark)),
+            })
+            .collect();
+        let els = crate::musicxml::import::with_x(els, layout);
+        score.bars[b].lines.push(Line {
+            lane: Lane::Phrase,
+            src: 0,
+            els,
+        });
+    }
+    Ok(found)
 }
 
 // The return value is the number of transposed notes. A bar range keeps the key signatures.

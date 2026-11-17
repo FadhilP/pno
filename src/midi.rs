@@ -28,12 +28,16 @@ fn msg(t: f64, rank: Rank, bytes: Vec<u8>) -> Msg {
     }
 }
 
+// The 3 bytes of a MIDI tempo hold at least 3.6 quarters per minute.
+const SLOWEST_QPM: f64 = 4.0;
+const FASTEST_QPM: f64 = 2000.0;
+
 // A format 1 standard MIDI file: a tempo track, then one track for each staff.
 // Both staves use channel 1, so the pedal holds the notes of both.
 pub fn write(p: &Performance) -> Vec<u8> {
     let mut conductor: Vec<Msg> = Vec::new();
     for (t, qpm) in &p.tempo {
-        let us = (60_000_000.0 / qpm).round() as u32;
+        let us = (60_000_000.0 / qpm.clamp(SLOWEST_QPM, FASTEST_QPM)).round() as u32;
         let b = us.to_be_bytes();
         conductor.push(msg(*t, Rank::Meta, vec![0xFF, 0x51, 3, b[1], b[2], b[3]]));
     }
@@ -45,18 +49,24 @@ pub fn write(p: &Performance) -> Vec<u8> {
             vec![0xFF, 0x58, 4, *num as u8, log, 24, 8],
         ));
     }
-    let mut upper = vec![msg(0.0, Rank::Control, vec![0xC0, p.program])];
+    let name = |n: &str| {
+        let mut b = vec![0xFF, 0x03, n.len() as u8];
+        b.extend_from_slice(n.as_bytes());
+        msg(0.0, Rank::Meta, b)
+    };
+    let mut upper = vec![name("rh"), msg(0.0, Rank::Control, vec![0xC0, p.program])];
     if let Some(v) = p.volume {
         upper.push(msg(0.0, Rank::Control, vec![0xB0, 7, v]));
     }
     if let Some(v) = p.pan {
         upper.push(msg(0.0, Rank::Control, vec![0xB0, 10, v]));
     }
-    let mut lower: Vec<Msg> = p
-        .pedal
-        .iter()
-        .map(|(t, v)| msg(*t, Rank::Control, vec![0xB0, 64, *v]))
-        .collect();
+    let mut lower: Vec<Msg> = vec![name("lh")];
+    lower.extend(
+        p.pedal
+            .iter()
+            .map(|(t, v)| msg(*t, Rank::Control, vec![0xB0, 64, *v])),
+    );
     for n in &p.notes {
         let track = match n.staff {
             Staff::Upper => &mut upper,

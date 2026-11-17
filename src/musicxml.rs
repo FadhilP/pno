@@ -3,13 +3,13 @@ pub mod import;
 use std::fmt::Write as _;
 use std::ops::RangeInclusive;
 
-use crate::analysis::{Analysis, Leaf, NoteRef, Part, PedalAction, Span, TupletGroup};
+use crate::analysis::{Analysis, Leaf, NoteRef, Part, PedalAction, Span, TupletGroup, flatten};
 use crate::frac::{Frac, NoteValue, lcm};
 use crate::model::{
     AccDisplay, ArpKind, Articulation, Attr, BarStyle, BracketEnd, Break, Clef, Dyn, Event,
     GroupHead, Hairpin, Head, Jump, Key, Lane, MarkKind, MetaField, Meter, Mode, Note,
-    OrnamentKind, Ottava, PedalStyle, Pitch, PitchMark, Place, Sign, Staff, Tempo, TempoMark,
-    TimeSymbol, Tok, TokMark, TupletLook,
+    OrnamentKind, Ottava, PedalStyle, PhraseMark, Pitch, PitchMark, Place, Sign, Staff, Tempo,
+    TempoMark, TimeSymbol, Tok, TokMark, TupletLook,
 };
 
 const MUSICXML_VELOCITY_BASE: f64 = 90.0;
@@ -172,13 +172,22 @@ fn header(ctx: &Ctx, out: &mut String) {
         env!("CARGO_PKG_VERSION")
     );
     let vel = vel_lines(score);
-    if !vel.is_empty() {
+    let phrases = phrase_fields(score);
+    if !vel.is_empty() || !phrases.is_empty() {
         out.push_str("    <miscellaneous>\n");
         // MuseScore keeps one field for each name, so each line has its own name.
         for (i, v) in vel.iter().enumerate() {
             let _ = writeln!(
                 out,
                 "      <miscellaneous-field name=\"pno-vel-{}\">{}</miscellaneous-field>",
+                i + 1,
+                esc(v)
+            );
+        }
+        for (i, v) in phrases.iter().enumerate() {
+            let _ = writeln!(
+                out,
+                "      <miscellaneous-field name=\"pno-phrase-{}\">{}</miscellaneous-field>",
                 i + 1,
                 esc(v)
             );
@@ -214,6 +223,22 @@ fn header(ctx: &Ctx, out: &mut String) {
         let _ = writeln!(out, "        <pan>{p}</pan>");
     }
     out.push_str("      </midi-instrument>\n    </score-part>\n  </part-list>\n");
+}
+
+// The phrase marks that are not drawn: "<bar index> <time in the bar> <mark>".
+fn phrase_fields(score: &crate::model::Score) -> Vec<String> {
+    let mut out = Vec::new();
+    for (b, bar) in score.bars.iter().enumerate() {
+        for line in bar.lines.iter().filter(|l| l.lane == Lane::Phrase) {
+            for (start, _, tok) in flatten(&line.els) {
+                let Tok::Phrase(m) = tok else { continue };
+                if !m.is_drawn() {
+                    out.push(format!("{b} {start} {}", m.text()));
+                }
+            }
+        }
+    }
+    out
 }
 
 fn vel_lines(score: &crate::model::Score) -> Vec<String> {
@@ -1186,7 +1211,7 @@ fn notations(
         }
     }
     if first {
-        let arts: Vec<&str> = nc
+        let mut arts: Vec<&str> = nc
             .marks
             .iter()
             .filter_map(|m| match m {
@@ -1200,6 +1225,12 @@ fn notations(
                 _ => None,
             })
             .collect();
+        let pause = a.pauses.get(&nc.leaf).filter(|_| r.part == Part::Main);
+        match pause {
+            Some(PhraseMark::Breath) => arts.push("<breath-mark/>"),
+            Some(PhraseMark::Caesura) => arts.push("<caesura/>"),
+            _ => {}
+        }
         if !arts.is_empty() {
             s.push_str("          <articulations>\n");
             for x in arts {
