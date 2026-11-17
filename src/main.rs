@@ -1,13 +1,16 @@
 mod accidental;
 mod analysis;
 mod analyze;
+mod audio;
 mod check;
 mod diag;
 mod edit;
 mod fmt;
 mod frac;
+mod midi;
 mod model;
 mod musicxml;
+mod perform;
 mod render;
 mod text;
 
@@ -49,11 +52,20 @@ enum Cmd {
         #[arg(long)]
         check: bool,
     },
-    /// Write MusicXML, or PDF, PNG, SVG, MIDI and audio through MuseScore
+    /// Write MusicXML or MIDI; PDF, PNG, SVG and audio through MuseScore, or audio through sfizz with --sound
     Export {
         file: PathBuf,
         /// Output file; the extension selects the format
         out: PathBuf,
+        /// MIDI and audio: play with small changes of timing and velocity, as a pianist does
+        #[arg(long)]
+        humanize: bool,
+        /// The seed of --humanize; the same seed gives the same performance
+        #[arg(long, requires = "humanize")]
+        seed: Option<u64>,
+        /// Audio: play the MIDI with this SFZ instrument through sfizz, not with MuseScore
+        #[arg(long)]
+        sound: Option<PathBuf>,
     },
     /// Read MusicXML into a pno file; .mxl and .mscz go through MuseScore
     Import {
@@ -377,6 +389,13 @@ fn through_musescore(xml: &str, out: &Path, args: &[&str]) -> Result<(), Failure
     Ok(())
 }
 
+fn random_seed() -> u64 {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.subsec_nanos());
+    u64::from(nanos) ^ u64::from(std::process::id()) << 32
+}
+
 fn read_musicxml(file: &Path) -> Result<String, Failure> {
     let ext = file
         .extension()
@@ -439,16 +458,61 @@ fn run(cmd: Cmd) -> Result<(), Failure> {
             let diags = check::check(&parsed.score, &parsed.diags);
             report_check(&parsed.score, diags, None)
         }
-        Cmd::Export { file, out } => {
+        Cmd::Export {
+            file,
+            out,
+            humanize,
+            seed,
+            sound,
+        } => {
             let score = checked(&file)?;
             let a = analysis::Analysis::new(&score);
-            let xml = musicxml::export(&a, musicxml::Scope::Full)
-                .map_err(|e| Failure { code: 1, msg: e })?;
             let ext = out
                 .extension()
                 .and_then(|e| e.to_str())
                 .unwrap_or("")
                 .to_ascii_lowercase();
+            let played = matches!(
+                ext.as_str(),
+                "mid" | "midi" | "wav" | "mp3" | "flac" | "ogg"
+            );
+            if !played && (humanize || sound.is_some()) {
+                return Err(usage(
+                    "--humanize and --sound apply only to MIDI and audio output",
+                ));
+            }
+            let is_midi = matches!(ext.as_str(), "mid" | "midi");
+            if is_midi && sound.is_some() {
+                return Err(usage("--sound applies only to audio output"));
+            }
+            if played && (is_midi || sound.is_some()) {
+                let mode = match (humanize, seed) {
+                    (false, _) => perform::Humanize::Off,
+                    (true, Some(s)) => perform::Humanize::Seed(s),
+                    (true, None) => {
+                        let s = random_seed();
+                        println!("humanize seed {s}");
+                        perform::Humanize::Seed(s)
+                    }
+                };
+                let bytes = midi::write(&perform::perform(&a, mode));
+                match &sound {
+                    Some(sfz) => {
+                        audio::render(&bytes, sfz, &out).map_err(|e| Failure { code: 1, msg: e })?
+                    }
+                    None => std::fs::write(&out, bytes)
+                        .map_err(|e| usage(format!("cannot write {}: {e}", out.display())))?,
+                }
+                println!("wrote {}", out.display());
+                return Ok(());
+            }
+            if humanize {
+                return Err(usage(
+                    "--humanize needs --sound for audio: MuseScore plays only the notation",
+                ));
+            }
+            let xml = musicxml::export(&a, musicxml::Scope::Full)
+                .map_err(|e| Failure { code: 1, msg: e })?;
             if matches!(ext.as_str(), "musicxml" | "xml") {
                 std::fs::write(&out, xml)
                     .map_err(|e| usage(format!("cannot write {}: {e}", out.display())))?;

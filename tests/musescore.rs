@@ -108,11 +108,6 @@ fn musescore_reads_the_exports() {
         height * 3 < width,
         "a trimmed system is wide and short: {width}x{height}"
     );
-
-    let mid = dir.join("score.mid");
-    let run = pno(&["export", path(&score), path(&mid)]);
-    assert_eq!(run.code, 0, "{}", run.stderr);
-    assert!(std::fs::read(&mid).expect("MIDI").starts_with(b"MThd"));
 }
 
 #[test]

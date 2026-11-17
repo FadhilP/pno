@@ -49,6 +49,7 @@ cargo install --path .
 
 - Rust 1.85 or later.
 - [MuseScore 4](https://musescore.org) for `render`, for PDF, PNG, SVG and audio export, and for `.mxl` and `.mscz` import. If it is not in the default place, set `PNO_MUSESCORE` to the path of its program.
+- For audio with an SFZ piano (`--sound`): [sfizz](https://github.com/sfztools/sfizz/releases) (the Windows zip contains `sfizz_render.exe`; put it on the `PATH` or set `PNO_SFIZZ`), and [ffmpeg](https://ffmpeg.org) for `.mp3`, `.flac` and `.ogg` (or set `PNO_FFMPEG`). A free SFZ piano: [Salamander Grand Piano](https://github.com/sfzinstruments/SalamanderGrandPiano) (CC BY 3.0).
 - For Claude Code, copy `skill/pno` to `~/.claude/skills/pno`, and `skill/audio-to-pno` to `~/.claude/skills/audio-to-pno`.
 
 ## Use
@@ -60,6 +61,7 @@ pno set score.pno '9 lh | C3 | - | - | - |'
 pno fmt score.pno                  # canonical form, then check
 pno render score.pno 9-14 -o bars.png
 pno export score.pno out.musicxml  # or out.pdf, out.mid
+pno export score.pno out.mp3 --sound piano.sfz --humanize
 ```
 
 | Command | Function |
@@ -67,7 +69,7 @@ pno export score.pno out.musicxml  # or out.pdf, out.mid
 | `check FILE [BARS]` | Syntax, bar fill, note values, ties and open spans. Each error gives the bar, lane and cell, and most give a correction. |
 | `fmt FILE [--fix] [--check]` | Writes the canonical form, then checks. `--fix` splits invalid `-` runs and renumbers the bars. |
 | `import FILE [-o OUT] [--keep stems,beams]` | MusicXML (and `.mxl`, `.mscz`) to `pno`, with a report of each dropped element. |
-| `export FILE OUT` | MusicXML directly; PDF, PNG, SVG, MIDI and audio through MuseScore. |
+| `export FILE OUT [--humanize [--seed N]] [--sound SFZ]` | MusicXML and MIDI directly; PDF, PNG and SVG through MuseScore. Audio through MuseScore, or with `--sound` through sfizz with an SFZ instrument (`.wav`, and `.mp3`, `.flac`, `.ogg` through ffmpeg); its loudest point is at -1 dBFS. `--humanize` plays MIDI and `--sound` audio with small changes of timing and velocity; the same seed gives the same result. |
 | `render FILE [BARS] [-o OUT] [--dpi N]` | A trimmed PNG of a bar range or of the score. |
 | `sound FILE [BARS] [--pedal]` | The pitches that sound at each onset, with held notes and the pedal. |
 | `analyze FILE [BARS] [--all]` | The chord of each beat, dissonances between the hands, repeated bars. |
@@ -88,6 +90,7 @@ The editing commands write the file only if the result passes `check`.
 | Rounded tuplets | The import reads exact note lengths, but directions, clefs and grace notes keep the rounded position of the source. |
 | MuseScore | MuseScore 4 does not read a tie into another voice. |
 | Not an engraver | `render` and PDF export need MuseScore. |
+| Playback | The MIDI and `--sound` export play the stored velocities and tempo marks. A hairpin, or a text such as "rit.", changes the sound only through the note velocities and the `=N` tempo marks in the file (SPEC section 3.5). No rubato. `--sound` reads SFZ, not SF2. |
 
 ### Corpus coverage
 

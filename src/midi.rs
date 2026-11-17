@@ -1,0 +1,109 @@
+use crate::model::Staff;
+use crate::perform::{Performance, TICKS_PER_QUARTER};
+
+// At one tick: note ends, then controllers, then note starts.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Rank {
+    Meta,
+    NoteOff,
+    Control,
+    NoteOn,
+}
+
+struct Msg {
+    tick: u32,
+    rank: Rank,
+    bytes: Vec<u8>,
+}
+
+fn tick(t: f64) -> u32 {
+    t.round().max(0.0) as u32
+}
+
+fn msg(t: f64, rank: Rank, bytes: Vec<u8>) -> Msg {
+    Msg {
+        tick: tick(t),
+        rank,
+        bytes,
+    }
+}
+
+// A format 1 standard MIDI file: a tempo track, then one track for each staff.
+// Both staves use channel 1, so the pedal holds the notes of both.
+pub fn write(p: &Performance) -> Vec<u8> {
+    let mut conductor: Vec<Msg> = Vec::new();
+    for (t, qpm) in &p.tempo {
+        let us = (60_000_000.0 / qpm).round() as u32;
+        let b = us.to_be_bytes();
+        conductor.push(msg(*t, Rank::Meta, vec![0xFF, 0x51, 3, b[1], b[2], b[3]]));
+    }
+    for (t, num, den) in &p.meters {
+        let log = den.trailing_zeros() as u8;
+        conductor.push(msg(
+            *t,
+            Rank::Meta,
+            vec![0xFF, 0x58, 4, *num as u8, log, 24, 8],
+        ));
+    }
+    let mut upper = vec![msg(0.0, Rank::Control, vec![0xC0, p.program])];
+    if let Some(v) = p.volume {
+        upper.push(msg(0.0, Rank::Control, vec![0xB0, 7, v]));
+    }
+    if let Some(v) = p.pan {
+        upper.push(msg(0.0, Rank::Control, vec![0xB0, 10, v]));
+    }
+    let mut lower: Vec<Msg> = p
+        .pedal
+        .iter()
+        .map(|(t, v)| msg(*t, Rank::Control, vec![0xB0, 64, *v]))
+        .collect();
+    for n in &p.notes {
+        let track = match n.staff {
+            Staff::Upper => &mut upper,
+            Staff::Lower => &mut lower,
+        };
+        let on = msg(n.on, Rank::NoteOn, vec![0x90, n.key, n.velocity]);
+        let off = Msg {
+            tick: tick(n.off).max(on.tick + 1),
+            rank: Rank::NoteOff,
+            bytes: vec![0x80, n.key, 64],
+        };
+        track.extend([on, off]);
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(b"MThd");
+    out.extend_from_slice(&6u32.to_be_bytes());
+    out.extend_from_slice(&1u16.to_be_bytes());
+    out.extend_from_slice(&3u16.to_be_bytes());
+    out.extend_from_slice(&(TICKS_PER_QUARTER as u16).to_be_bytes());
+    for track in [conductor, upper, lower] {
+        write_track(&mut out, track, tick(p.end));
+    }
+    out
+}
+
+fn write_track(out: &mut Vec<u8>, mut msgs: Vec<Msg>, end: u32) {
+    msgs.sort_by_key(|m| (m.tick, m.rank));
+    let mut body = Vec::new();
+    let mut last = 0;
+    for m in &msgs {
+        push_varlen(&mut body, m.tick - last);
+        body.extend_from_slice(&m.bytes);
+        last = m.tick;
+    }
+    push_varlen(&mut body, end.saturating_sub(last));
+    body.extend_from_slice(&[0xFF, 0x2F, 0]);
+    out.extend_from_slice(b"MTrk");
+    out.extend_from_slice(&(body.len() as u32).to_be_bytes());
+    out.extend_from_slice(&body);
+}
+
+fn push_varlen(out: &mut Vec<u8>, mut v: u32) {
+    let mut groups = vec![(v & 0x7F) as u8];
+    v >>= 7;
+    while v > 0 {
+        groups.push((v & 0x7F) as u8 | 0x80);
+        v >>= 7;
+    }
+    out.extend(groups.iter().rev());
+}

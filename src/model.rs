@@ -595,7 +595,28 @@ pub enum TempoMark {
     Shown { metronome: Metronome, parens: bool },
 }
 
+impl Metronome {
+    pub fn quarters_per_minute(&self) -> f64 {
+        let unit = match self.unit {
+            'w' => 4.0,
+            'h' => 2.0,
+            'e' => 0.5,
+            's' => 0.25,
+            _ => 1.0,
+        };
+        let dotted = if self.dotted { 1.5 } else { 1.0 };
+        self.bpm * unit * dotted
+    }
+}
+
 impl TempoMark {
+    pub fn quarters_per_minute(&self) -> f64 {
+        match self {
+            TempoMark::Sound(q) => *q,
+            TempoMark::Hidden(m) | TempoMark::Shown { metronome: m, .. } => m.quarters_per_minute(),
+        }
+    }
+
     // A hidden quarter metronome is `=72`, the canonical form.
     pub fn hidden(m: Metronome) -> TempoMark {
         if m.unit == 'q' && !m.dotted {

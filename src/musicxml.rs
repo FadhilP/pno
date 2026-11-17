@@ -1449,18 +1449,6 @@ fn pedal_held_before(a: &Analysis, b: usize) -> bool {
     held
 }
 
-fn tempo_value(m: &crate::model::Metronome) -> f64 {
-    let unit = match m.unit {
-        'w' => 4.0,
-        'h' => 2.0,
-        'e' => 0.5,
-        's' => 0.25,
-        _ => 1.0,
-    };
-    let dotted = if m.dotted { 1.5 } else { 1.0 };
-    m.bpm * unit * dotted
-}
-
 fn metronome_xml(m: &crate::model::Metronome, parens: bool, visible: bool) -> String {
     let unit = match m.unit {
         'w' => "whole",
@@ -1606,11 +1594,17 @@ fn tempo_direction(tempo: &Tempo, t: i64, n: usize, carried: bool) -> Option<Ite
         match &tempo.mark {
             Some(TempoMark::Shown { metronome, parens }) => {
                 types.push(metronome_xml(metronome, *parens, true));
-                sound = Some(format!("tempo=\"{}\"", num(tempo_value(metronome))));
+                sound = Some(format!(
+                    "tempo=\"{}\"",
+                    num(metronome.quarters_per_minute())
+                ));
             }
             Some(TempoMark::Hidden(metronome)) => {
                 types.push(metronome_xml(metronome, false, false));
-                sound = Some(format!("tempo=\"{}\"", num(tempo_value(metronome))));
+                sound = Some(format!(
+                    "tempo=\"{}\"",
+                    num(metronome.quarters_per_minute())
+                ));
             }
             Some(TempoMark::Sound(bpm)) => {
                 if tempo.text.is_none() {

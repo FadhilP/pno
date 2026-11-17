@@ -17,7 +17,7 @@ A `pno` file is a piano score as text: one line for each bar and lane. A text ed
 4. Edit the lines. Replace a line by its bar and lane: `sed -i 's/^9 \+lh .*/9 lh | C3 G3 | E4 G3 | C3 D3 E3 G3 | E4 C3 |/' score.pno`. A `sed` with no match changes nothing and says nothing, so read the result.
 5. `pno fmt score.pno` until it prints `ok: N bars, M warnings`. It writes the canonical form (column padding too), then checks the full file. Each error gives the bar, the lane and the cell; most give a correction. Warnings (hands cross, a wide span in one hand, a note outside the piano) do not stop the work, but read them.
 6. Render one time, after the edit, if the look matters (beams, voices, marks): `pno render score.pno 9-14 -o bars.png`, then look at the image. Line breaks in a range render are not the line breaks of the score; for the page layout, use `pno render score.pno`.
-7. If the user needs MusicXML or a PDF: `pno export score.pno out.musicxml` (or `out.pdf`).
+7. If the user needs MusicXML or a PDF: `pno export score.pno out.musicxml` (or `out.pdf`). For MIDI: `pno export score.pno out.mid`. For audio with a sampled piano: `pno export score.pno out.mp3 --sound piano.sfz` (needs sfizz, and ffmpeg for formats other than `.wav`). `--humanize` adds small changes of timing and velocity; it prints its seed, and `--seed N` repeats a performance.
 
 `sound`, `analyze`, `render` and `export` stop with the errors of `check` if the file has errors. `pno check score.pno 9-10` shows only the messages of bars 9-10, but prints `ok` only if the full file is correct.
 
