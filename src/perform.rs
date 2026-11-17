@@ -4,8 +4,8 @@ use crate::accidental::key_alter;
 use crate::analysis::{Analysis, NoteRef, Part, PedalAction, flatten};
 use crate::frac::Frac;
 use crate::model::{
-    ArpKind, Articulation, Attr, GroupHead, Jump, Lane, Note, OrnamentKind, Pitch, PitchMark,
-    Score, Sign, Staff, Tok, TokMark,
+    ArpKind, Articulation, Attr, BarStyle, GroupHead, Jump, Lane, MarkKind, Mode, Note,
+    OrnamentKind, Pitch, PitchMark, Score, Sign, Staff, Tok, TokMark,
 };
 
 pub const TICKS_PER_QUARTER: f64 = 480.0;
@@ -13,6 +13,15 @@ const TICKS_PER_WHOLE: f64 = 4.0 * TICKS_PER_QUARTER;
 // MuseScore plays a score with no metronome mark at this tempo.
 const DEFAULT_QPM: f64 = 120.0;
 const FERMATA_STRETCH: f64 = 2.0;
+// With --humanize: the tempo at the end of a "rit." or "accel.", as a part of the tempo before it.
+const RIT: f64 = 0.75;
+const ACCEL: f64 = 1.2;
+const FINAL_RIT: f64 = 0.7;
+// A tempo change is a curve of steps, one each 16th.
+const CURVE_STEP: f64 = TICKS_PER_QUARTER / 4.0;
+// With --phrase: the change of velocity and tempo between the ends and the peak of a phrase.
+const PHRASE_VEL: f64 = 6.0;
+const PHRASE_TEMPO: f64 = 0.02;
 const GRACE_MS: f64 = 70.0;
 const ORNAMENT_MS: f64 = 70.0;
 const ARPEGGIO_MS: f64 = 35.0;
@@ -49,6 +58,12 @@ pub struct Played {
 pub enum Humanize {
     Off,
     Seed(u64),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Shaping {
+    Off,
+    Phrases,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -120,13 +135,17 @@ fn ticks(f: Frac) -> f64 {
     f.num() as f64 * TICKS_PER_WHOLE / f.den() as f64
 }
 
-pub fn perform(a: &Analysis, humanize: Humanize) -> Performance {
+pub fn perform(a: &Analysis, humanize: Humanize, shaping: Shaping) -> Performance {
     let order = instances(a.score);
     let mut by_bar: Vec<Vec<usize>> = vec![Vec::new(); a.score.bars.len()];
     for (id, leaf) in a.leaves.iter().enumerate() {
         by_bar[leaf.bar].push(id);
     }
-    let tempo = tempo_map(a, &order, &by_bar);
+    let arcs = match shaping {
+        Shaping::Off => None,
+        Shaping::Phrases => Some(Arcs::new(a, &order, &by_bar)),
+    };
+    let tempo = tempo_map(a, &order, &by_bar, humanize, arcs.as_ref());
     let legato = slurred_leaves(a);
     let mut raw = Vec::new();
     for inst in &order {
@@ -134,6 +153,11 @@ pub fn perform(a: &Analysis, humanize: Humanize) -> Performance {
         for &id in &by_bar[inst.bar] {
             let at = inst.start + ticks(a.leaves[id].start - lead);
             leaf_notes(a, id, at, &tempo, legato.contains(&id), &mut raw);
+        }
+    }
+    if let Some(arcs) = &arcs {
+        for r in &mut raw {
+            r.vel += PHRASE_VEL * arcs.at(r.on);
         }
     }
     let raw: Vec<Raw> = join_ties(raw)
@@ -290,19 +314,43 @@ fn play_order(score: &Score) -> Vec<usize> {
     order
 }
 
-fn tempo_map(a: &Analysis, order: &[Instance], by_bar: &[Vec<usize>]) -> TempoMap {
+fn tempo_map(
+    a: &Analysis,
+    order: &[Instance],
+    by_bar: &[Vec<usize>],
+    humanize: Humanize,
+    arcs: Option<&Arcs>,
+) -> TempoMap {
     let mut marks = Vec::new();
     let mut holds = Vec::new();
+    let mut words: Vec<(f64, f64, TempoWord)> = Vec::new();
     for inst in order {
         let bar = &a.score.bars[inst.bar];
         let local = |t: Frac| inst.start + ticks(t - bar.layout.lead);
-        for line in bar.lines.iter().filter(|l| l.lane == Lane::Tempo) {
+        let lines = bar
+            .lines
+            .iter()
+            .filter(|l| matches!(l.lane, Lane::Tempo | Lane::Mark(_, MarkKind::Text, _)));
+        for line in lines {
             for (start, _, tok) in flatten(&line.els) {
-                if let Tok::Tempo(t) = tok {
-                    if let Some(q) = t.mark.as_ref().map(|m| m.quarters_per_minute()) {
-                        marks.push((local(start), q));
+                let (text, ext) = match tok {
+                    Tok::Tempo(t) => {
+                        if let Some(q) = t.mark.as_ref().map(|m| m.quarters_per_minute()) {
+                            marks.push((local(start), q));
+                        }
+                        (t.text.as_deref(), t.ext)
                     }
-                }
+                    Tok::Text(t) => (Some(t.text.as_str()), t.ext),
+                    _ => continue,
+                };
+                let Some(word) = text.and_then(tempo_word) else {
+                    continue;
+                };
+                let len = match a.spans.iter().find(|s| std::ptr::eq(s.tok, tok)) {
+                    Some(s) if ext => a.abs(s.end.0, s.end.1) - a.abs(s.start.0, s.start.1),
+                    _ => bar.layout.length(),
+                };
+                words.push((local(start), local(start) + ticks(len), word));
             }
         }
         for leaf in by_bar[inst.bar].iter().map(|&id| &a.leaves[id]) {
@@ -323,20 +371,342 @@ fn tempo_map(a: &Analysis, order: &[Instance], by_bar: &[Vec<usize>]) -> TempoMa
             .last()
             .map_or(DEFAULT_QPM, |(_, q)| *q)
     };
+    let ramps = match humanize {
+        Humanize::Off => Vec::new(),
+        Humanize::Seed(_) => tempo_ramps(a, order, by_bar, &marks, words),
+    };
     let mut cuts: Vec<f64> = marks.iter().map(|m| m.0).collect();
     cuts.extend(holds.iter().flat_map(|h| [h.0, h.1]));
+    for r in &ramps {
+        let steps = ((r.to - r.from) / CURVE_STEP).ceil() as usize;
+        cuts.extend((0..=steps).map(|k| (r.from + k as f64 * CURVE_STEP).min(r.to)));
+    }
+    if let Some(arcs) = arcs {
+        let steps = (arcs.length / CURVE_STEP).ceil() as usize;
+        cuts.extend((0..steps).map(|k| k as f64 * CURVE_STEP));
+    }
     cuts.push(0.0);
     cuts.sort_by(f64::total_cmp);
     cuts.dedup();
     let mut points: Vec<(f64, f64)> = Vec::new();
     for t in cuts {
         let held = holds.iter().any(|(s, e)| *s <= t && t < *e);
-        let q = base(t) / if held { FERMATA_STRETCH } else { 1.0 };
+        let arc = arcs.map_or(1.0, |p| 1.0 + PHRASE_TEMPO * p.at(t));
+        let q = base(t) * ramp_factor(&ramps, t) * arc / if held { FERMATA_STRETCH } else { 1.0 };
         if points.last().is_none_or(|p| p.1 != q) {
             points.push((t, q));
         }
     }
     TempoMap { points }
+}
+
+#[derive(Clone, Copy)]
+enum TempoWord {
+    Change(f64),
+    Back,
+}
+
+fn tempo_word(text: &str) -> Option<TempoWord> {
+    let t = text.to_lowercase();
+    let has = |w: &str| t.contains(w);
+    if t.starts_with("a tempo") || has("tempo i") || has("tempo primo") {
+        return Some(TempoWord::Back);
+    }
+    let strength = if has("poco") {
+        0.5
+    } else if has("molto") {
+        1.6
+    } else {
+        1.0
+    };
+    if has("rit") || has("rall") || has("allarg") || has("slent") {
+        return Some(TempoWord::Change(1.0 - (1.0 - RIT) * strength));
+    }
+    if has("accel") || has("string") {
+        return Some(TempoWord::Change(1.0 + (ACCEL - 1.0) * strength));
+    }
+    None
+}
+
+// From `from` to `to` the tempo changes on a curve; `Back` returns to the written tempo.
+struct Ramp {
+    from: f64,
+    to: f64,
+    change: TempoWord,
+}
+
+// The tempo words, and a final ritardando over the two bars before the last onset if no
+// slower word is there. A metronome mark or "a tempo" ends a change.
+fn tempo_ramps(
+    a: &Analysis,
+    order: &[Instance],
+    by_bar: &[Vec<usize>],
+    marks: &[(f64, f64)],
+    mut words: Vec<(f64, f64, TempoWord)>,
+) -> Vec<Ramp> {
+    words.sort_by(|x, y| x.0.total_cmp(&y.0));
+    words.dedup_by(|x, y| (x.0 - y.0).abs() < 1.0);
+    let mut backs: Vec<f64> = marks.iter().map(|m| m.0).collect();
+    backs.extend(
+        words
+            .iter()
+            .filter(|w| matches!(w.2, TempoWord::Back))
+            .map(|w| w.0),
+    );
+    let mut ramps: Vec<Ramp> = Vec::new();
+    for (from, to, change) in words {
+        if let TempoWord::Change(_) = change {
+            let to = backs
+                .iter()
+                .copied()
+                .filter(|b| *b > from)
+                .fold(to, f64::min);
+            ramps.push(Ramp { from, to, change });
+        }
+    }
+    for b in backs {
+        ramps.push(Ramp {
+            from: b,
+            to: b,
+            change: TempoWord::Back,
+        });
+    }
+    if let Some((last, bar)) = last_onset(a, order, by_bar) {
+        let from = (last - 2.0 * ticks(a.score.bars[bar].layout.length())).max(0.0);
+        let slower = ramps
+            .iter()
+            .any(|r| r.to > from && matches!(r.change, TempoWord::Change(f) if f < 1.0));
+        if !slower {
+            ramps.push(Ramp {
+                from,
+                to: last,
+                change: TempoWord::Change(FINAL_RIT),
+            });
+        }
+    }
+    ramps.sort_by(|x, y| x.from.total_cmp(&y.from));
+    ramps
+}
+
+fn last_onset(a: &Analysis, order: &[Instance], by_bar: &[Vec<usize>]) -> Option<(f64, usize)> {
+    order.iter().rev().find_map(|inst| {
+        let lead = a.score.bars[inst.bar].layout.lead;
+        by_bar[inst.bar]
+            .iter()
+            .map(|&id| &a.leaves[id])
+            .filter(|l| {
+                l.event()
+                    .is_some_and(|ev| ev.notes().iter().any(|n| !n.tied))
+            })
+            .map(|l| inst.start + ticks(l.start - lead))
+            .max_by(f64::total_cmp)
+            .map(|t| (t, inst.bar))
+    })
+}
+
+// Friberg and Sundberg's curve of a final ritardando; the other changes use it too.
+fn ramp_factor(ramps: &[Ramp], t: f64) -> f64 {
+    let mut f = 1.0;
+    for r in ramps.iter().take_while(|r| r.from <= t) {
+        match r.change {
+            TempoWord::Back => f = 1.0,
+            TempoWord::Change(m) => {
+                let x = if r.to > r.from {
+                    ((t - r.from) / (r.to - r.from)).min(1.0)
+                } else {
+                    1.0
+                };
+                f *= (1.0 + (m.powi(3) - 1.0) * x).cbrt();
+            }
+        }
+    }
+    f
+}
+
+// The phrases of the score, in ticks of score time (repeats not played out).
+struct Arcs {
+    phrases: Vec<(f64, f64)>,
+    // The start of each played bar: (performance tick, score tick).
+    starts: Vec<(f64, f64)>,
+    length: f64,
+}
+
+impl Arcs {
+    fn new(a: &Analysis, order: &[Instance], by_bar: &[Vec<usize>]) -> Arcs {
+        let starts: Vec<(f64, f64)> = order
+            .iter()
+            .map(|i| (i.start, ticks(a.bars[i.bar].start)))
+            .collect();
+        let length = order.last().map_or(0.0, |i| {
+            i.start + ticks(a.score.bars[i.bar].layout.length())
+        });
+        Arcs {
+            phrases: find_phrases(a, by_bar),
+            starts,
+            length,
+        }
+    }
+
+    // Todd's phrase arc, from -1 at the ends of a phrase to 1 at 60 % of its length.
+    fn at(&self, t: f64) -> f64 {
+        let k = self.starts.partition_point(|s| s.0 <= t).saturating_sub(1);
+        let Some((perf, score)) = self.starts.get(k) else {
+            return 0.0;
+        };
+        let pos = score + (t - perf);
+        let Some((from, to)) = self.phrases.iter().find(|(f, e)| *f <= pos && pos < *e) else {
+            return 0.0;
+        };
+        let x = (pos - from) / (to - from);
+        let peak = 0.5f64.ln() / 0.6f64.ln();
+        (std::f64::consts::PI * x.powf(peak)).sin() * 2.0 - 1.0
+    }
+}
+
+const TOP: Lane = Lane::Voice(Staff::Upper, 1);
+
+// Slurs of two bars or longer in `rh` are phrases; shorter slurs group a motif. The time between them is cut into groups of
+// 2 to 8 bars, 4 if no boundary is stronger.
+fn find_phrases(a: &Analysis, by_bar: &[Vec<usize>]) -> Vec<(f64, f64)> {
+    let at = |leaf: usize, end: bool| {
+        let l = &a.leaves[leaf];
+        ticks(a.abs(l.bar, if end { l.end() } else { l.start }))
+    };
+    let mut slurs: Vec<(f64, f64)> = a
+        .slurs
+        .iter()
+        .filter(|s| a.leaves[s.start.leaf].lane == TOP)
+        .map(|s| (at(s.start.leaf, false), at(s.end.leaf, true), s.start.leaf))
+        .filter(|(f, t, leaf)| {
+            t - f >= 2.0 * ticks(a.score.bars[a.leaves[*leaf].bar].layout.length())
+        })
+        .map(|(f, t, _)| (f, t))
+        .collect();
+    slurs.sort_by(|x, y| x.0.total_cmp(&y.0));
+    let mut out: Vec<(f64, f64)> = Vec::new();
+    let mut cur = 0.0;
+    for (f, t) in slurs {
+        if f < cur {
+            continue;
+        }
+        if f > cur {
+            out.extend(group_bars(a, by_bar, cur, f));
+        }
+        out.push((f, t));
+        cur = t;
+    }
+    let total = a
+        .bars
+        .last()
+        .zip(a.score.bars.last())
+        .map_or(0.0, |(info, bar)| ticks(info.start + bar.layout.length()));
+    if cur < total {
+        out.extend(group_bars(a, by_bar, cur, total));
+    }
+    out
+}
+
+fn group_bars(a: &Analysis, by_bar: &[Vec<usize>], from: f64, to: f64) -> Vec<(f64, f64)> {
+    let start = |b: usize| ticks(a.bars[b].start);
+    let mut out = Vec::new();
+    let mut cur = from;
+    let mut k = (0..a.bars.len())
+        .rev()
+        .find(|&b| start(b) <= cur)
+        .unwrap_or(0);
+    loop {
+        let options = (k + 2..=k + 8).filter(|&b| b < a.bars.len() && start(b) < to);
+        let rank = |b: usize| boundary(a, by_bar, b) - 0.5 * (b as f64 - k as f64 - 4.0).abs();
+        let Some(best) = options.max_by(|x, y| rank(*x).total_cmp(&rank(*y))) else {
+            out.push((cur, to));
+            return out;
+        };
+        let rest_too_short = to - start(best) < 2.0 * ticks(a.score.bars[best].layout.length());
+        if rest_too_short {
+            out.push((cur, to));
+            return out;
+        }
+        out.push((cur, start(best)));
+        cur = start(best);
+        k = best;
+    }
+}
+
+// How strongly a phrase ends before bar `b`.
+fn boundary(a: &Analysis, by_bar: &[Vec<usize>], b: usize) -> f64 {
+    let prev = b - 1;
+    let bars = &a.score.bars;
+    let volta = |x: usize| {
+        bars[x].attrs.iter().find_map(|at| match at {
+            Attr::Volta { numbers, .. } => Some(numbers.clone()),
+            _ => None,
+        })
+    };
+    let ends_section = bars[prev].attrs.iter().any(|at| {
+        matches!(
+            at,
+            Attr::Repeat { end: Some(_), .. }
+                | Attr::Jump(_)
+                | Attr::Barline {
+                    style: BarStyle::Double | BarStyle::Final,
+                    ..
+                }
+        )
+    });
+    let starts_section = bars[b]
+        .attrs
+        .iter()
+        .any(|at| matches!(at, Attr::Repeat { start: true, .. } | Attr::Sign(_)));
+    let top: Vec<&crate::analysis::Leaf> = by_bar[prev]
+        .iter()
+        .chain(&by_bar[b])
+        .map(|&id| &a.leaves[id])
+        .filter(|l| l.lane == TOP)
+        .collect();
+    let is_rest = |l: &crate::analysis::Leaf| l.event().is_some_and(|ev| ev.notes().is_empty());
+    let last = top.iter().filter(|l| l.bar == prev).max_by_key(|l| l.start);
+    let first = top.iter().filter(|l| l.bar == b).min_by_key(|l| l.start);
+    let rest = last.is_some_and(|l| is_rest(l)) || first.is_some_and(|l| is_rest(l));
+    let long = last.is_some_and(|l| !is_rest(l) && l.dur * 2 >= bars[prev].layout.length());
+    let mut score = 0.0;
+    if ends_section || starts_section || volta(prev) != volta(b) {
+        score += 3.0;
+    }
+    if rest {
+        score += 2.0;
+    }
+    if long {
+        score += 1.0;
+    }
+    if bass_on_tonic(a, by_bar, prev) {
+        score += 1.0;
+    }
+    score
+}
+
+fn bass_on_tonic(a: &Analysis, by_bar: &[Vec<usize>], bar: usize) -> bool {
+    let lower: Vec<&crate::analysis::Leaf> = by_bar[bar]
+        .iter()
+        .map(|&id| &a.leaves[id])
+        .filter(|l| l.lane.staff() == Some(Staff::Lower))
+        .filter(|l| l.event().is_some_and(|ev| !ev.notes().is_empty()))
+        .collect();
+    let Some(last) = lower.iter().map(|l| l.start).max() else {
+        return false;
+    };
+    let bass = lower
+        .iter()
+        .filter(|l| l.start == last)
+        .flat_map(|l| l.event().map(|ev| ev.notes()).unwrap_or_default())
+        .map(|n| n.pitch.midi())
+        .min();
+    let key = a.bars[bar].key;
+    let major = (i32::from(key.fifths) * 7).rem_euclid(12);
+    let tonic = match key.mode {
+        Some(Mode::Minor) => (major + 9) % 12,
+        _ => major,
+    };
+    bass.is_some_and(|m| m.rem_euclid(12) == tonic)
 }
 
 // The leaves under a slur, except the last one: they play legato.

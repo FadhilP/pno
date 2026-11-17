@@ -63,6 +63,9 @@ enum Cmd {
         /// The seed of --humanize; the same seed gives the same performance
         #[arg(long, requires = "humanize")]
         seed: Option<u64>,
+        /// MIDI and audio: shape each phrase with a curve of tempo and velocity
+        #[arg(long)]
+        phrase: bool,
         /// Audio: play the MIDI with this SFZ instrument through sfizz, not with MuseScore
         #[arg(long)]
         sound: Option<PathBuf>,
@@ -463,6 +466,7 @@ fn run(cmd: Cmd) -> Result<(), Failure> {
             out,
             humanize,
             seed,
+            phrase,
             sound,
         } => {
             let score = checked(&file)?;
@@ -476,9 +480,9 @@ fn run(cmd: Cmd) -> Result<(), Failure> {
                 ext.as_str(),
                 "mid" | "midi" | "wav" | "mp3" | "flac" | "ogg"
             );
-            if !played && (humanize || sound.is_some()) {
+            if !played && (humanize || phrase || sound.is_some()) {
                 return Err(usage(
-                    "--humanize and --sound apply only to MIDI and audio output",
+                    "--humanize, --phrase and --sound apply only to MIDI and audio output",
                 ));
             }
             let is_midi = matches!(ext.as_str(), "mid" | "midi");
@@ -495,7 +499,12 @@ fn run(cmd: Cmd) -> Result<(), Failure> {
                         perform::Humanize::Seed(s)
                     }
                 };
-                let bytes = midi::write(&perform::perform(&a, mode));
+                let shaping = if phrase {
+                    perform::Shaping::Phrases
+                } else {
+                    perform::Shaping::Off
+                };
+                let bytes = midi::write(&perform::perform(&a, mode, shaping));
                 match &sound {
                     Some(sfz) => {
                         audio::render(&bytes, sfz, &out).map_err(|e| Failure { code: 1, msg: e })?
@@ -506,9 +515,9 @@ fn run(cmd: Cmd) -> Result<(), Failure> {
                 println!("wrote {}", out.display());
                 return Ok(());
             }
-            if humanize {
+            if humanize || phrase {
                 return Err(usage(
-                    "--humanize needs --sound for audio: MuseScore plays only the notation",
+                    "--humanize and --phrase need --sound for audio: MuseScore plays only the notation",
                 ));
             }
             let xml = musicxml::export(&a, musicxml::Scope::Full)

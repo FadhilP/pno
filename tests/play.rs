@@ -59,7 +59,7 @@ fn read_midi(file: &Path) -> Midi {
                     }
                     if kind == 0x51 {
                         let us = u32::from_be_bytes([0, b[i], b[i + 1], b[i + 2]]);
-                        m.tempo.push((t, 60_000_000 / us));
+                        m.tempo.push((t, (60_000_000 + us / 2) / us));
                     }
                     i += n;
                 }
@@ -320,4 +320,119 @@ fn sfizz_plays_the_score_with_an_sfz_instrument() {
         assert_eq!(run.code, 0, "{}{}", run.stdout, run.stderr);
         assert!(std::fs::metadata(&mp3).expect("MP3 file").len() > 10_000);
     }
+}
+
+#[test]
+fn humanize_plays_tempo_words_and_a_final_ritardando() {
+    let dir = temp_dir("play-rit");
+    let text = "@ format=1
+
+1 tempo | =100 | _ | _ | _ |
+1 rh    | C5 | D5 | E5 | F5 |
+1 lh    | R |
+
+2 tempo | \"rit.\" | - | - | - |
+2 rh    | G5 | F5 | E5 | D5 |
+2 lh    | R |
+
+3 tempo | \"a tempo\" | _ | _ | _ |
+3 rh    | C5 | D5 | E5 | F5 |
+3 lh    | R |
+
+4 rh    | G5 | F5 | E5 | D5 |
+4 lh    | R |
+
+5 rh    | C5 | D5 | E5 | F5 |
+5 lh    | R |
+
+6 rh    | C5 | - | - | - |
+6 lh    | R |
+";
+    let score = write(&dir, "rit.pno", text);
+    let plain = export(&dir, &score, "plain.mid", &[]);
+    assert_eq!(
+        plain.tempo,
+        vec![(0, 100)],
+        "the texts change nothing without --humanize"
+    );
+    let m = export(&dir, &score, "rit.mid", &["--humanize", "--seed", "1"]);
+    let at = |t: u32| {
+        m.tempo
+            .iter()
+            .take_while(|p| p.0 <= t)
+            .last()
+            .expect("a tempo")
+            .1
+    };
+    let between = |from: u32, to: u32| -> Vec<u32> {
+        m.tempo
+            .iter()
+            .filter(|p| from <= p.0 && p.0 < to)
+            .map(|p| p.1)
+            .collect()
+    };
+    let rit = between(1920, 3840);
+    assert!(rit.windows(2).all(|w| w[0] >= w[1]), "{rit:?}");
+    assert!((75..=80).contains(rit.last().expect("steps")), "{rit:?}");
+    assert_eq!(at(3840), 100, "a tempo");
+    let last = between(5760, 9601);
+    assert!(last.windows(2).all(|w| w[0] >= w[1]), "{last:?}");
+    assert_eq!(at(9600), 70, "the last onset is at 70 % of the tempo");
+}
+
+#[test]
+fn phrase_shapes_slurs_and_bar_groups_that_end_at_a_rest() {
+    let dir = temp_dir("play-phrase");
+    let text = "@ format=1
+
+1 tempo | =60 | _ | _ | _ |
+1 rh    | C5( | D5 | E5 | F5 |
+1 lh    | R |
+
+2 rh    | G5 | A5 | B5 | C6) |
+2 lh    | R |
+
+3 rh    | C5 | D5 | E5 | F5 |
+3 lh    | R |
+
+4 rh    | G5 | F5 | E5 | r |
+4 lh    | R |
+
+5 rh    | C5 | D5 | E5 | F5 |
+5 lh    | R |
+
+6 rh    | G5 | F5 | E5 | D5 |
+6 lh    | R |
+";
+    let score = write(&dir, "p.pno", text);
+    let plain = export(&dir, &score, "plain.mid", &[]);
+    assert!(plain.notes.iter().all(|n| n.vel == 68));
+    let m = export(&dir, &score, "p.mid", &["--phrase"]);
+    assert_eq!(
+        export(&dir, &score, "again.mid", &["--phrase"]).notes,
+        m.notes
+    );
+    let vel = |on: u32| m.notes.iter().find(|n| n.on == on).expect("a note").vel;
+    // Each phrase starts soft and slow: the slur, bars 3-4 up to the rest, bars 5-6.
+    assert_eq!((vel(0), vel(3840), vel(7680)), (62, 62, 62));
+    assert!(
+        vel(2400) >= 72,
+        "the peak of the slur phrase: {}",
+        vel(2400)
+    );
+    let tempo = |t: u32| {
+        m.tempo
+            .iter()
+            .take_while(|p| p.0 <= t)
+            .last()
+            .expect("a tempo")
+            .1
+    };
+    assert_eq!((tempo(0), tempo(3840), tempo(7680)), (59, 59, 59));
+    assert!(
+        m.tempo.iter().all(|p| (59..=61).contains(&p.1)),
+        "{:?}",
+        m.tempo
+    );
+    assert!(m.tempo.iter().any(|p| p.1 == 61));
 }
