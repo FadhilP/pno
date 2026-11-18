@@ -109,6 +109,9 @@ enum Cmd {
         /// Also show the notes that the pedal holds
         #[arg(long)]
         pedal: bool,
+        /// Also show the MIDI velocity of each new note, for example C5@80
+        #[arg(long)]
+        velocity: bool,
     },
     /// Print the chord of each beat, dissonances between the hands, and repeated bars
     Analyze {
@@ -726,7 +729,12 @@ fn run(cmd: Cmd) -> Result<(), Failure> {
             let _ = std::fs::remove_file(&style);
             result
         }
-        Cmd::Sound { file, bars, pedal } => {
+        Cmd::Sound {
+            file,
+            bars,
+            pedal,
+            velocity,
+        } => {
             let score = checked(&file)?;
             let bars = bar_list(&score, bars.as_deref())?;
             let notes = if pedal {
@@ -735,7 +743,12 @@ fn run(cmd: Cmd) -> Result<(), Failure> {
                 analyze::PedalNotes::Hide
             };
             let a = analysis::Analysis::new(&score);
-            print!("{}", analyze::sound(&a, &bars, notes));
+            let velocities = if velocity {
+                analyze::Velocities::Show
+            } else {
+                analyze::Velocities::Hide
+            };
+            print!("{}", analyze::sound(&a, &bars, notes, velocities));
             Ok(())
         }
         Cmd::Analyze { file, bars, all } => {

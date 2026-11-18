@@ -43,6 +43,8 @@ The first bars of Chopin's Étude Op. 10 No. 3 ("Tristesse"):
 
 The full format is in [SPEC.md](SPEC.md). `pno spec` prints it one section at a time.
 
+How the code works (modules, playback, the audio-to-pno skill, tests) is in [docs/](docs/README.md).
+
 ## Playback
 
 The file stores playback data only where it differs from what the notation implies (SPEC section 3.5):
@@ -104,7 +106,7 @@ pno export score.pno out.mp3 --sound piano.sfz --humanize --phrase
 | `import FILE [-o OUT] [--keep stems,beams]` | MusicXML (and `.mxl`, `.mscz`) to `pno`, with a report of each dropped element. |
 | `export FILE OUT... [--humanize [--seed N]] [--phrase[=AMOUNT]] [--sound SFZ] [--bars B] [--colors RH,LH]` | MusicXML and MIDI directly; PDF, PNG, SVG and the other MuseScore formats through MuseScore, with no pedal marks (MusicXML, `.mxl`, `.mscz` and `.mscx` keep them, and all playback uses the pedal). Audio through MuseScore, or with `--sound` through sfizz (`.wav`, and `.mp3`, `.flac`, `.ogg` through ffmpeg). A video (`.mp4`) with `--sound`. With several output files, MIDI and the audio and video made with `--sound` play one performance; each option applies to the formats that use it. A file that cannot be written (for example one that another program has open) is named, and the other files are still written. See [Playback](#playback). |
 | `render FILE [BARS] [-o OUT] [--dpi N]` | A trimmed PNG of a bar range or of the score. |
-| `sound FILE [BARS] [--pedal]` | The pitches that sound at each onset, with held notes and the pedal. |
+| `sound FILE [BARS] [--pedal] [--velocity]` | The pitches that sound at each onset, with held notes and the pedal. `--velocity` adds the MIDI velocity of each new note (`C5@80`). |
 | `analyze FILE [BARS] [--all]` | The chord of each beat, dissonances between the hands, repeated bars. |
 | `set FILE LINE...` | Replaces lines by bar and lane, or adds a lane to a bar. |
 | `phrase FILE` | Writes the phrases that `--phrase` finds as `/` and `//` marks, and prints why each starts. |

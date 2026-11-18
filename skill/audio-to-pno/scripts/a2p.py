@@ -1095,16 +1095,15 @@ def cmd_compare(a):
 
 # ---------------------------------------------------------------- check
 
-def meter(score_text):
-    """The quarter notes in each beat of a bar, from the first time signature (pno spec 3.6)."""
-    m = re.search(r'^@\s*time=(\S+)', score_text, re.M)
-    if not m or m[1] == 'c':
+def beat_lengths(signature):
+    """The quarter notes in each beat of a bar of this time signature (pno spec 3.6)."""
+    if signature == 'c':
         return [1] * 4
-    if m[1] == 'cut':
+    if signature == 'cut':
         return [2] * 2
-    upper, lower = re.match(r'([\d+]+)/(\d+)', m[1]).groups()
+    upper, lower = re.match(r'([\d+]+)/(\d+)', signature).groups()
     lower = int(lower)
-    pattern = re.search(r'\(([\d+]+)\)', m[1])
+    pattern = re.search(r'\(([\d+]+)\)', signature)
     if pattern or '+' in upper:                 # 7/8(2+2+3) or 2+2+3/8: a beat for each group
         return [Fraction(int(n) * 4, lower) for n in (pattern[1] if pattern else upper).split('+')]
     upper = int(upper)
@@ -1115,57 +1114,70 @@ def meter(score_text):
     return [Fraction(4, lower)] * upper
 
 
-def struck_velocities(score_path, beats):
-    """Pitch and velocity of the notes that start at each beat, counted from the start of the score; `beats` as from meter()."""
-    import mido
-    with tempfile.TemporaryDirectory() as folder:
-        target = Path(folder) / 'score.mid'
-        export(score_path, target)
-        mid = mido.MidiFile(target)
-    tick, struck = 0, {}
-    for message in mido.merge_tracks(mid.tracks):
-        tick += message.time
-        if message.type == 'note_on' and message.velocity > 0:
-            struck.setdefault(beat_of(Fraction(tick, mid.ticks_per_beat), beats), []).append((message.note, message.velocity))
-    return struck
+def x_share(tokens):
+    """The share of a cell that leading `x` slots take: time that is not in the bar (pno spec 3.2)."""
+    return Fraction(next((i for i, t in enumerate(tokens) if t != 'x'), len(tokens)), len(tokens))
 
 
-def beat_of(quarters, beats):
-    """The beat from the start of the score, at this many quarter notes; the beats of a bar can differ in length."""
-    bar, rest = divmod(quarters, sum(beats))
-    for i, length in enumerate(beats):
-        if rest < length:
-            return (bar * len(beats) + i + rest / length).limit_denominator(48)
-        rest -= length
+def bar_cells(text):
+    """Each bar in file order as (label, quarter notes of each cell, share of `x` in its first cell, share of `x` in its last cell).
+    A time signature holds until the next one. A bar has the cells of its rh line: an incomplete bar or a cadenza has its own count."""
+    signature, cells, bars = 'c', {}, []
+    for line in text.splitlines():
+        words = line.split()
+        if '@' in words[:2]:
+            settings = dict(w.split('=', 1) for w in words if '=' in w)
+            signature = settings.get('time', signature)
+            if 'cells' in settings:
+                cells[words[0]] = int(settings['cells'])
+        elif len(words) > 1 and words[1] == 'rh':
+            full = beat_lengths(signature)
+            row = [cell.split() for cell in line.split('|')[1:-1]]
+            count = cells.get(words[0], len(full)) if row == [['R']] else len(row)
+            lead, trail = x_share(row[0]), x_share(row[-1][::-1])
+            shift = -count if lead else 0           # a bar that starts with `x` is the end of a bar: in 7/8(2+2+3) a pickup cell is the 3
+            bars.append((words[0], [full[(i + shift) % len(full)] for i in range(count)], lead, trail))
+    return bars
 
 
 def onsets(score_path):
-    """One row per onset from `pno sound`: bar, beat from 0, then new and held pitches of each hand; and the beats of meter()."""
+    """One row per onset from `pno sound`: bar, beat from 0, then new and held pitches of each hand; bar_cells(); and the pitch
+    and velocity of each new note by (bar, beat).
+    The second part of a split bar (`8b`) is in its bar, after the cells that the first part plays."""
     text = Path(score_path).read_text()
     with tempfile.TemporaryDirectory() as folder:
         plain = Path(folder) / 'score.pno'
         plain.write_text(''.join(line for line in text.splitlines(True) if '.8va' not in line))   # `pno sound` adds an octave under 8va
-        report = subprocess.run(['pno', 'sound', str(plain)], capture_output=True, text=True, check=True).stdout
-    rows = []
+        report = subprocess.run(['pno', 'sound', '--velocity', str(plain)], capture_output=True, text=True, check=True).stdout
+    bars = bar_cells(text)
+    first = {label: len(lengths) - trail for label, lengths, _, trail in bars}
+    later = {label: first[label[:-1]] - lead for label, _, lead, _ in bars if label.endswith('b')}
+    rows, struck = [], {}
     for line in report.splitlines():
-        m = re.match(r'(\d+) ([\d+/]+)\s+lh(.*?)\| rh([^\[]*)', line)
+        m = re.match(r'(\d+)(b?) ([\d+/]+)\s+lh(.*?)\| rh([^\[]*)', line)
         if not m:
             continue
+        bar, beat = int(m[1]), later.get(m[1] + m[2], 0) + sum(Fraction(x) for x in m[3].split('+')) - 1
         hands = []
-        for side in (m[3], m[4]):
+        for side in (m[4], m[5]):
             tokens = [t for t in side.split() if t != '-']
-            hands += [[midi(t) for t in tokens if not t.endswith('~')], [midi(t.rstrip('~')) for t in tokens if t.endswith('~')]]
-        rows.append((int(m[1]), sum(Fraction(x) for x in m[2].split('+')) - 1, *hands))
-    return rows, meter(text)
+            new = [(midi(pitch), int(velocity)) for pitch, velocity in (t.split('@') for t in tokens if not t.endswith('~'))]
+            hands += [[pitch for pitch, _ in new], [midi(t.rstrip('~')) for t in tokens if t.endswith('~')]]
+            struck.setdefault((bar, beat), []).extend(new)
+        rows.append((bar, beat, *hands))
+    return rows, bars, struck
 
 
 def cmd_check(a):
-    rows, beats = onsets(a.score)
-    per_bar = len(beats)
+    rows, bars, struck = onsets(a.score)
+    starts, total = {}, 0
+    for label, lengths, lead, trail in bars:
+        starts[label] = total - lead
+        total += len(lengths) - lead - trail
     song = json.loads(Path(a.song).read_text()) if a.song else {}
     free = set(bar_list(song['free_bars'])) if song.get('free_bars') else set()
     at = lambda bar, beat: f'{bar}:{float(beat) + 1:g}'
-    clock = lambda bar, beat: (bar - 1) * per_bar + beat
+    clock = lambda bar, beat: starts[str(bar)] + beat
     findings = {}
 
     if 'melody' in song:
@@ -1179,10 +1191,9 @@ def cmd_check(a):
         findings['melody notes below another note (an octave doubling above is not counted)'] = [
             f'{at(*key)} {name(pitch)} below {name(max(heard[key]))}' for key, pitch in sorted(tune.items())
             if pitch in heard.get(key, []) and max(heard[key]) % 12 != pitch % 12]
-        struck = struck_velocities(a.score, beats)
         quiet = []
         for key, pitch in sorted(tune.items()):
-            together = struck.get(clock(*key), [])
+            together = struck.get(key, [])
             own = [v for p, v in together if p == pitch]
             others = [v for p, v in together if p % 12 != pitch % 12]
             if own and others and max(own) <= max(others):
@@ -1191,10 +1202,10 @@ def cmd_check(a):
         velocities = [v for notes in struck.values() for _, v in notes]
         print(f'velocities in the score: {min(velocities)} to {max(velocities)}')
 
-    times = sorted({clock(bar, beat) for bar, beat, ln, _, rn, _ in rows if ln or rn})
+    times = sorted({clock(bar, beat): (bar, beat) for bar, beat, ln, _, rn, _ in rows if ln or rn}.items())
     findings['dead spots: 2 beats or more with no new note'] = [
-        f'bar {int(a0 // per_bar) + 1} beat {float(a0 % per_bar) + 1:g}: {float(b0 - a0):g} beats'
-        for a0, b0 in zip(times, times[1:]) if b0 - a0 >= 2 and int(a0 // per_bar) + 1 not in free]
+        f'bar {bar} beat {float(beat) + 1:g}: {float(b0 - a0):g} beats'
+        for (a0, (bar, beat)), (b0, _) in zip(times, times[1:]) if b0 - a0 >= 2 and bar not in free]
 
     left = [(bar, beat, ln) for bar, beat, ln, _, _, _ in rows if ln]
     findings['left-hand leaps larger than an octave inside a bar (the leap from the bass note is not counted)'] = [

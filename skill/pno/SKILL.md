@@ -12,7 +12,7 @@ A `pno` file is a piano score as text: one line for each bar and lane. A text ed
 1. A MusicXML, `.mxl` or `.mscz` file: `pno import score.musicxml` writes `score.pno`. The report lists what the format does not keep.
 2. Read only the bars you need: search for lines that start with the bar number (`^9 `). A pickup bar is bar 0.
 3. Before you change the music, look at it. `BARS` is a range or a list (`9-10,13-14`); without it, all bars.
-   - `pno sound score.pno 9-10,13-14`: the pitches of each hand at each onset (`lh ... | rh ...`). A `~` after a pitch is a note that sounds from before. `--pedal` adds the notes that the pedal holds (`*`).
+   - `pno sound score.pno 9-10,13-14`: the pitches of each hand at each onset (`lh ... | rh ...`). A `~` after a pitch is a note that sounds from before. `--pedal` adds the notes that the pedal holds (`*`). `--velocity` adds the MIDI velocity of each new note (`C5@80`), to check the balance of the hands.
    - `pno analyze score.pno`: the chord of each beat, strong dissonances between the hands (`--all` adds the mild ones), and bars that repeat an earlier bar.
 4. Edit the lines with `pno set` (see below). If you edit the text in another way, read the result: a `sed` with no match changes nothing and says nothing.
 5. `pno fmt score.pno` until it prints `ok: N bars, M warnings`. It writes the canonical form (column padding too), then checks the full file. Each error gives the bar, the lane and the cell; most give a correction. Warnings (hands cross, a wide span in one hand, a note outside the piano) do not stop the work, but read them.

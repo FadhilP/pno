@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
-use crate::analysis::{Analysis, PedalAction};
+use crate::analysis::{Analysis, NoteRef, Part, PedalAction};
 use crate::frac::Frac;
 use crate::model::{Head, Ottava, Pitch, PitchMark, Score, Staff, TokMark};
 use crate::text::write::write_line;
@@ -12,6 +12,7 @@ struct Key {
     start: Frac,
     end: Frac,
     tied: bool,
+    velocity: u8,
 }
 
 impl Key {
@@ -44,7 +45,12 @@ fn sounding(p: Pitch, ottava: Option<Ottava>) -> Pitch {
 
 fn keys(a: &Analysis) -> Vec<Key> {
     let mut out = Vec::new();
-    for leaf in a.leaves.iter().filter(|l| l.lane.is_voice()) {
+    for (id, leaf) in a
+        .leaves
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| l.lane.is_voice())
+    {
         let Some(ev) = leaf.event() else {
             continue;
         };
@@ -58,13 +64,23 @@ fn keys(a: &Analysis) -> Vec<Key> {
             continue;
         };
         let ottava = a.ottava_at(hand, leaf.bar, leaf.start);
-        for n in notes.iter().filter(|n| !n.has(PitchMark::Mute)) {
+        for (note, n) in notes
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| !n.has(PitchMark::Mute))
+        {
+            let r = NoteRef {
+                leaf: id,
+                part: Part::Main,
+                note,
+            };
             out.push(Key {
                 pitch: sounding(n.pitch, ottava),
                 hand,
                 start: a.abs(leaf.bar, leaf.start),
                 end: a.abs(leaf.bar, leaf.end()),
                 tied: n.tied,
+                velocity: a.velocity(r).note.round().clamp(1.0, 127.0) as u8,
             });
         }
     }
@@ -153,6 +169,12 @@ pub enum PedalNotes {
     Show,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Velocities {
+    Hide,
+    Show,
+}
+
 fn hand_sounds(sounds: &BTreeMap<(Staff, i32), String>, hand: Staff) -> String {
     let notes: Vec<&str> = sounds
         .iter()
@@ -166,7 +188,12 @@ fn hand_sounds(sounds: &BTreeMap<(Staff, i32), String>, hand: Staff) -> String {
     }
 }
 
-pub fn sound(a: &Analysis, bars: &[usize], pedal_notes: PedalNotes) -> String {
+pub fn sound(
+    a: &Analysis,
+    bars: &[usize],
+    pedal_notes: PedalNotes,
+    velocities: Velocities,
+) -> String {
     let keys = keys(a);
     let down = pedal_down(a);
     let mut out = String::from("lh | rh, pitches low to high; ~ sounds from before");
@@ -183,7 +210,11 @@ pub fn sound(a: &Analysis, bars: &[usize], pedal_notes: PedalNotes) -> String {
             }
         }
         for k in keys.iter().filter(|k| k.held_at(at)) {
-            let mark = if k.attacked_at(at) { "" } else { "~" };
+            let mark = match (k.attacked_at(at), velocities) {
+                (false, _) => "~".to_string(),
+                (true, Velocities::Show) => format!("@{}", k.velocity),
+                (true, Velocities::Hide) => String::new(),
+            };
             sounds.insert((k.hand, k.midi()), format!("{}{mark}", k.pitch));
         }
         let actions: Vec<PedalAction> = a

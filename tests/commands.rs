@@ -60,6 +60,29 @@ fn sound_adds_the_notes_that_the_pedal_holds() {
 }
 
 #[test]
+fn sound_velocity_shows_the_midi_velocity_of_each_new_note() {
+    let dir = temp_dir("sound-velocity");
+    let text = "@ format=1
+
+1 rh   | C5+E5^v-20 | - | G5 | - |
+1 lh   | C3:v+10 | - | - | - |
+";
+    let f = write(&dir, "v.pno", text);
+    let out = run_ok(&["sound", path(&f), "--velocity"]);
+    assert!(out.contains("\n1 1      lh C3@78 | rh C5@68 E5@48\n"), "{out}");
+    assert!(out.contains("\n1 3      lh C3~ | rh G5@68\n"), "{out}");
+    let mid = dir.join("v.mid");
+    run_ok(&["export", path(&f), path(&mid)]);
+    let bytes = std::fs::read(&mid).expect("MIDI is written");
+    for (key, velocity) in [(48u8, 78u8), (72, 68), (76, 48), (79, 68)] {
+        assert!(
+            bytes.windows(3).any(|w| w == [0x90, key, velocity]),
+            "the MIDI has no note-on {key} at {velocity}"
+        );
+    }
+}
+
+#[test]
 fn analyze_names_chords_and_repeated_bars() {
     let f = score_copy("analyze");
     let out = run_ok(&["analyze", path(&f), "2,10"]);
