@@ -59,6 +59,7 @@ struct Ctx<'s, 'a> {
     div: i64,
     range: RangeInclusive<usize>,
     frame: Frame,
+    pedal: PedalMarks,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -91,7 +92,14 @@ pub enum Scope {
     Bars(RangeInclusive<usize>),
 }
 
-pub fn export(a: &Analysis, scope: Scope) -> Result<String, String> {
+// PDF, PNG and SVG leave out the pedal marks; MusicXML keeps them, and MuseScore plays them.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum PedalMarks {
+    Show,
+    Hide,
+}
+
+pub fn export(a: &Analysis, scope: Scope, pedal: PedalMarks) -> Result<String, String> {
     let score = a.score;
     if score.bars.is_empty() {
         return Err("the file has no bars".into());
@@ -105,6 +113,7 @@ pub fn export(a: &Analysis, scope: Scope) -> Result<String, String> {
         div: divisions(a),
         range,
         frame,
+        pedal,
     };
     let mut out = String::new();
     out.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
@@ -1375,6 +1384,65 @@ fn directions(ctx: &Ctx, b: usize) -> Result<Vec<Direction>, String> {
             }
         }
     }
+    if ctx.pedal == PedalMarks::Show {
+        out.extend(pedal_directions(ctx, b)?);
+    }
+    for at in &bar.attrs {
+        match at {
+            Attr::Sign(s) => {
+                let (ty, sound) = match s {
+                    Sign::Segno => ("<segno/>", "segno=\"segno\""),
+                    Sign::Coda => ("<coda/>", "coda=\"coda\""),
+                };
+                out.push((
+                    direction(
+                        0,
+                        Staff::Upper,
+                        "above",
+                        &[ty.to_string()],
+                        Some(sound.to_string()),
+                        Layer::Staff,
+                    ),
+                    Staff::Upper,
+                ));
+            }
+            Attr::Jump(j) => {
+                let (text, sound) = match j {
+                    Jump::Dc => ("D.C.", "dacapo=\"yes\""),
+                    Jump::Ds => ("D.S.", "dalsegno=\"segno\""),
+                    Jump::DcFine => ("D.C. al Fine", "dacapo=\"yes\""),
+                    Jump::DsFine => ("D.S. al Fine", "dalsegno=\"segno\""),
+                    Jump::DcCoda => ("D.C. al Coda", "dacapo=\"yes\""),
+                    Jump::DsCoda => ("D.S. al Coda", "dalsegno=\"segno\""),
+                    Jump::ToCoda => ("To Coda", "tocoda=\"coda\""),
+                    Jump::Fine => ("Fine", "fine=\"yes\""),
+                };
+                let ty = format!("<words>{text}</words>");
+                out.push((
+                    direction(
+                        ctx.pos(b, bar_end)?,
+                        Staff::Upper,
+                        "above",
+                        &[ty],
+                        Some(sound.to_string()),
+                        Layer::Staff,
+                    ),
+                    Staff::Upper,
+                ));
+            }
+            _ => {}
+        }
+    }
+    Ok(out)
+}
+
+// The pedal marks of bar `b`, below the lower staff.
+fn pedal_directions(ctx: &Ctx, b: usize) -> Result<Vec<Direction>, String> {
+    let a = ctx.a;
+    let first_bar = *ctx.range.start();
+    let last_bar = *ctx.range.end();
+    let bar_end = a.bar_end(b);
+    let mut out: Vec<Direction> = Vec::new();
     let style = match a.pedal_style {
         PedalStyle::Line => "line=\"yes\" sign=\"no\"",
         PedalStyle::Sign => "line=\"no\" sign=\"yes\"",
@@ -1422,52 +1490,6 @@ fn directions(ctx: &Ctx, b: usize) -> Result<Vec<Direction>, String> {
             ),
             Staff::Lower,
         ));
-    }
-    for at in &bar.attrs {
-        match at {
-            Attr::Sign(s) => {
-                let (ty, sound) = match s {
-                    Sign::Segno => ("<segno/>", "segno=\"segno\""),
-                    Sign::Coda => ("<coda/>", "coda=\"coda\""),
-                };
-                out.push((
-                    direction(
-                        0,
-                        Staff::Upper,
-                        "above",
-                        &[ty.to_string()],
-                        Some(sound.to_string()),
-                        Layer::Staff,
-                    ),
-                    Staff::Upper,
-                ));
-            }
-            Attr::Jump(j) => {
-                let (text, sound) = match j {
-                    Jump::Dc => ("D.C.", "dacapo=\"yes\""),
-                    Jump::Ds => ("D.S.", "dalsegno=\"segno\""),
-                    Jump::DcFine => ("D.C. al Fine", "dacapo=\"yes\""),
-                    Jump::DsFine => ("D.S. al Fine", "dalsegno=\"segno\""),
-                    Jump::DcCoda => ("D.C. al Coda", "dacapo=\"yes\""),
-                    Jump::DsCoda => ("D.S. al Coda", "dalsegno=\"segno\""),
-                    Jump::ToCoda => ("To Coda", "tocoda=\"coda\""),
-                    Jump::Fine => ("Fine", "fine=\"yes\""),
-                };
-                let ty = format!("<words>{text}</words>");
-                out.push((
-                    direction(
-                        ctx.pos(b, bar_end)?,
-                        Staff::Upper,
-                        "above",
-                        &[ty],
-                        Some(sound.to_string()),
-                        Layer::Staff,
-                    ),
-                    Staff::Upper,
-                ));
-            }
-            _ => {}
-        }
     }
     Ok(out)
 }

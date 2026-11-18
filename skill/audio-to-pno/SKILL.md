@@ -7,132 +7,121 @@ description: Transcribe or arrange a recording (mp3, wav, flac, m4a, webm, opus,
 
 This skill gives evidence and checks. It does not convert audio to a score in one step: the models make many errors, and you decide each bar.
 
-`a2p.py` supplies what you cannot get by ear: the notes two models hear, the bar grid, the loudness of any pitch through time, and a comparison of your score with the recording. Read the `pno` skill first; you write and edit the score with it.
+`pno a2p` supplies what you cannot get by ear: the notes three models hear, the bar grid, the loudness of any pitch through time, and a comparison of your score with the recording. Read the `pno` skill first; you write and edit the score with it.
 
-## Setup, one time on a machine
+## Setup
 
-```
-python ~/.claude/skills/audio-to-pno/scripts/setup_env.py
-```
-
-It makes a venv in `~/.cache/audio-to-pno/venv` (about 1.2 GB), installs the pinned packages (tested with Python 3.10), downloads the piano model (172 MB) and prints the path of the venv Python. Use that Python for `a2p.py`. `ffmpeg`, `pno` and MuseScore must be installed (`pno export` needs MuseScore).
+`pno a2p` sets itself up on its first run, and again after a `pno` update that changes the setup: it makes a venv in `~/.cache/audio-to-pno/venv` with `python` from the PATH (or `PNO_PYTHON`; about 1.3 GB, tested with Python 3.10), and downloads three models (172 MB, 81 MB and 12 MB). With an NVIDIA GPU (`nvidia-smi` on the PATH) it installs the CUDA build of torch (the venv is then about 3.8 GB), and the models of `prepare` run on the GPU. The first `prepare` downloads the lead-voice model (204 MB). `ffmpeg`, `pno`, MuseScore (PDF, `render`, `compare`) and sfizz (the video) must be installed. If `sfizz_render` is not on the PATH, set `PNO_SFIZZ` to its path.
 
 ```
-PY=~/.cache/audio-to-pno/venv/Scripts/python        # bin/python on Linux and macOS
-A2P="$PY $HOME/.claude/skills/audio-to-pno/scripts/a2p.py -w work"
+A2P="pno a2p -w work"
 ```
 
-The commands are for Bash. Shell variables do not stay between tool calls, so set `PY` and `A2P` again at the start of each call. `-w` is the folder for the files of one song. Use a new folder for each song.
+The commands are for Bash. Set `A2P` again in each tool call: shell variables do not stay. `-w` is the folder for the files of one song; use a new folder for each song.
+
+Each command prints only a summary and the places with a problem. `compare` and `check` print at most 12 rows for each list (`--rows N` changes it) and write all rows to a file in `work/`. Read that file only when you need the rows.
 
 ## Workflow
 
 ### 1. Prepare
 
-`$A2P prepare song.webm` writes `src.wav`, four stems, `pt.json` (piano model) and `bp.json` (sustained-note model). ffmpeg reads each audio format. Give it the file as the user downloaded it, and do not convert it first: each lossy encode removes detail. From YouTube, `yt-dlp -f bestaudio URL` gives the original Opus stream in a `.webm`; `--audio-format mp3` encodes it again.
+`$A2P prepare song.webm` writes `src.wav`. Then it splits the stems and tracks the beats. Then a karaoke model writes `lead.wav`, the lead voice without backing vocals, for `tune`; and the three note models and the chord model read `backing.wav` (the bass stem plus the `other` stem), because a voice and drums give the models false notes, and basic-pitch also reads the bass stem. On a GPU it takes about a third of the length of the song; on a CPU, about three times the length (the lead-voice model takes most of it; not measured on a full run). Give it the file as the user downloaded it: ffmpeg reads each audio format, and each lossy encode removes detail. From YouTube, `yt-dlp -f bestaudio URL` gives the original stream; `--audio-format mp3` encodes it again.
 
-Read the report to learn what the recording is. Do not trust the title, and do not use notes, key or tempo that you remember for a song.
+The report tells you what the recording is. Do not trust the title, and do not use notes, key or tempo that you remember for a song.
 
 - Stems: a drum or vocal stem near 0% means that part is absent. It does not mean solo piano.
-- "repeat a pitch within 0.25 s": a piano gives a low share. A high share (it was 32% for a recording with a tremolo lead and bass) means sustained or tremolo instruments, which the piano model hears as many short notes.
-- For a song with vocals, the melody is in the vocal stem: `$A2P bp vocals`, then `roll --extra bp_vocals`. This path is not tested.
-- Decide from these lines if the recording is solo piano. If you are not sure, ask the user. Step 4 depends on it.
+- A bass stem of about 10% or more means a bass instrument: step 3 reads its line with `$A2P bass`.
+- `notes`: the note count of each model, and of each group of models that agree on a note. `t` is Transkun (a piano model), `p` is the first piano model, `b` is basic-pitch (sustained notes).
+- "Transkun has N% of the notes that pt and bp agree on": 95% or more was always solo piano in the tests, and less than 89% was never solo piano. Between them, the other lines and the user decide.
+- "N% of the bp notes repeat a pitch within 0.25 s": a piano gives less than 10%. A high value (30%) means sustained or tremolo instruments.
+- With vocals (a vocal stem of about 10% or more), the melody is in the vocal stem: step 3 reads it with `$A2P tune`.
+- Decide now if the recording is solo piano. If you are not sure, ask the user. Steps 3 and 4 depend on it: for solo piano, give `--view piano` to each `roll` and `raw`.
 
 ### 2. Fix the grid before any note
 
-`$A2P grid` measures; `$A2P grid --set` saves its suggestion to `grid.json`; `--set beats_per_bar=4 t0=1.23` replaces fields. Each later command reads `grid.json`, so a wrong grid makes each later result wrong.
+`$A2P grid` prints two grids: the tracked grid (it follows the beat tracker and each tempo change) and the best constant grid. It lists the bars where they differ. `$A2P grid --set` saves the tracked grid, and `$A2P grid --constant` saves the constant grid. Each later command reads `grid.json`, so a wrong grid makes each later result wrong. Decide these, in this order:
 
-Decide these, in this order:
+1. **Which grid.** If the line says `steady`, use `--constant`. If the tempo changes, use the tracked grid. If the line `the tracker missed N beats` is there, look at those bars in step 3.
+2. **Beat level.** The tracker often finds a beat that is two, three or four times too fast or too slow (in half of the rendered test clips). Its tempo is not proof. Prefer a beat of 0.4 to 1.0 s for which the fastest regular notes are sixteenths. In the `onset lock` line, the first division with a high value gives the fastest regular notes.
+   - The beat is longer than 1.0 s, or the values are low to 4 and high at 8: `--set level=double` splits each beat.
+   - The beat is shorter than 0.4 s, or the values are high from 1 or 2 and do not rise at 4: `--set level=half` joins two beats.
+   - Give a field two times for a factor of four: `--set level=half level=half`.
+   - Compound meter (6/8, 12/8): the tracker usually gives the eighth note as the beat, with 3 or 6 beats in a bar. Use `--set level=third quarters_per_beat=1.5 beats_per_bar=2`. If the beat is already the dotted quarter (high at 3 and 6, low at 2 and 4), use only `quarters_per_beat=1.5`.
+   - The line `the tracker changed between two beat levels` means that the grid has the faster level.
+   - Two levels can both be correct (4/4 at 150 with eighths, or at 75 with sixteenths). Tell the user which you used.
+3. **Bar length and bar 1.** `--set beats_per_bar=4` changes the bar length. `--set shift=1` starts bar 1 one beat later (`shift=-1`: earlier). Do this when less than 80% of the tracked downbeats agree, or when `roll` shows the bass after slot 0. Do not use a pickup bar while you work: if the music starts before a downbeat, bar 1 starts with rests. You can change it to a pickup bar after the last check.
 
-1. **Steady tempo.** The line `grid offset in each 10 s window` ends in `steady` or `NOT steady`. If it is not steady (rubato, a live take, a tempo change), stop and tell the user. A constant grid does not fit, and this tool has no other grid.
-2. **Beat period.** The tracker often finds half or double the tempo. Test the other one with `--beat-s` (for example `--beat-s 0.75` when it found 0.375) and compare the two tables. Prefer a beat of 0.4 to 1.0 s for which the fastest regular notes are sixteenths. A suggestion of 6 beats in a bar with only beat 1 high usually means that the true beat is two times as long (3 beats in a bar). In the `onset lock` line, a high value at 3 and 6 with a low value at 2 and 4 means a triplet or compound beat (set `quarters_per_beat=1.5` for 6/8; not tested).
-3. **Bar length and downbeat.** In the table, the correct bar length has one beat with a clearly higher change of harmony and bass. That beat is the downbeat.
-4. **`t0`** is the time of beat 1 of bar 1. Do not use a pickup bar while you work: if the music starts before a downbeat, bar 1 starts with rests (`t0` is then earlier than the first note). You can change it to a pickup bar after the last check.
+Fields go together, and the level fields come first: `$A2P grid --constant --set level=half beats_per_bar=4 shift=2`.
 
-Confirm the grid with `roll` on some bars: bass notes must be at slot 0, and chord changes at bar starts. The key comes from the `pitch classes` line together with the bass notes of the first and last bars.
+Confirm with `roll` on some bars at the start, the middle and the end: bass notes must be at slot 0, and chord changes at bar starts. If the bass leaves slot 0 in many bars of a slow, free recording, the tracker did not follow it: tell the user. The key comes from the `pitch classes` line together with the bass notes of the first and last bars.
 
-### 3. Read the evidence
+### 3. Read the evidence, then write `song.json`
 
 ```
-$A2P roll 1-16            # each bar: notes of both models, a triad guess, the strongest low pitch
-$A2P raw 12-13 --lo A4    # the same notes, not merged, with beat positions and velocities
+$A2P roll 1-16            # one line for each bar: chord, bass note, low notes, high notes
+$A2P roll 1-16 --view piano   # solo piano: only the notes that Transkun has
+$A2P raw 12-13 --lo A4    # the same notes with exact beat positions and velocities, re-onsets not merged
 $A2P peek 28 G5,B5,E6     # loudness of pitches through time; use it when the models disagree
 ```
 
-Find the form first (which bars repeat), then the bass note and chord of each bar, then the melody.
+A `roll` line is `5 Em E3 | 0:E2/1tb 2:B2/1 | 0:C5/4 4:B4/4! 8:E5/9x5pb | +5`.
 
-- The piano model (`pt`) is better for onsets and for struck or plucked notes. `!` marks a strong note. `xN` marks N fast re-onsets of one pitch: that is one sustained note, and usually the melody instrument.
-- The sustained-note model (`bp`) is better for the length of held notes and for a melody that `pt` cuts into pieces.
-- Octave errors are common. Harmonics of a loud bass note show as notes: the fifth harmonic of E2 is G#4, which looks like a major third. The third harmonic of F#2 is C#4.
-- The triad guess knows only major and minor triads. Read sevenths and inversions from the notes.
-- A strong note that repeats in parallel bars is real. A weak note that only one model has, one time, is probably not.
-- Parallel passages help: read an unclear bar together with the bar that repeats it.
+- `Em` is the chord of the bar from a chord model: the root and the triad (major, `m`, `dim`, `aug`, `sus2`, `sus4`). `Bm>F#m` means that the two halves of the bar have different chords (even meters only). `?` marks a chord that the model is not sure of, and `-` is no chord. The model does not give sevenths and inversions: read them from the notes and the bass field.
+- A note is `slot:pitch/length` in sixteenths. `!` marks a strong note. `xN` marks N fast re-onsets of one pitch: that is one sustained or tremolo note, and usually the melody instrument.
+- The letters are the models that have the note. No letter means all three: that note is the most certain.
+- `+5` counts the hidden notes of the bar. `--view all` shows them.
 
-### 4. Write the score
+Which notes to trust:
 
-Write `song.pno` with the `pno` skill: `@ key`, `@ time`, a tempo mark, `ped*`, then all bars. `pno fmt --fix` splits long notes into legal tied values.
+- **Solo piano: `--view piano`.** It shows the notes that Transkun has. In the tests these had 99% of the true notes, and 98% to 100% of them were true. A note without `t` was false in 9 of 10 cases. Velocities and lengths are from Transkun. The lengths are key releases: with the pedal down, the sound is longer.
+- **Other recordings: the default view, `mix`.** The piano models do not hear a lead instrument that is not a piano: in rendered ensembles, the notes of two models had 3 of 4 tune notes or fewer, and `b` alone had 9 of 10. So `mix` shows the notes of two models and each note of 0.25 s or longer that only `b` has. A long `b` note in the high part is often the tune. In the tests, 3 to 4 of 10 notes in this view were false: confirm the tune with `peek` and with parallel bars. Use `--view all` for a bar where the tune or the bass is absent.
+- The chord is not from the shown notes: the chord model hears `backing.wav`. In pop songs its root and triad are right about 6 of 7 of the time; for solo piano and rendered ensembles, about 19 of 20. A chord without `?` has the right root in more than 9 of 10 bars. Where the bass field has a different note, that chord is still right in 4 of 5 bars: the bass then plays an inversion or a passing note. A chord with `?` (about 1 of 8) has the right root in about half of the bars, and in 2 of 3 where the bass field has the same note: confirm it with the notes and the parallel bars.
+- The bass field is the first note of the bass stem that starts in the bar. Where the stem is silent (a solo piano, a bar where the bass rests), it is the lowest shown note that starts in beat 1, and `-` when there is none. It has the note name of the bass in more than 9 of 10 bars, and the octave in about 9 of 10.
+- Velocities are from the piano models only. A value with `a` in `raw`, such as `(a43)`, is a `bp` amplitude; do not use it for dynamics.
+- Octave errors are common, and the harmonics of a loud bass note show as notes.
+- A strong note that repeats in parallel bars is real. Read an unclear bar together with the bar that repeats it.
 
-**Solo piano: stay true to the recording.** When the recording is solo piano, you transcribe; you do not arrange. Write what the pianist plays: the notes, voicing, register, figuration and hand split, with velocities that follow the loudness of the recording (the velocity syntax is under **Make the tune heard**). Do not add, remove or re-voice notes to make a better piece. Arrange only when the user asks for it. The rest of this step is for other recordings, and for a solo piano recording that the user asked you to arrange.
+**The bass line: `bass`.** `$A2P bass 1-16` prints the notes of the bass stem in the `tune` format (`~` and `?` as there). When the bass stem is silent it stops with "the bass stem is silent": read the bass from `roll`. In pop songs about 7 of 10 of its notes are a bass note within one sixteenth: its onsets are often one slot late, so prefer the beat. Notes with `?` are true less often. A long note can show as some short notes of one pitch. Low `roll` notes that are not in this line are mostly chord notes: only half of the `roll` notes below E3 were bass notes.
 
-You are the arranger. The recording fixes two things: the tune (pitches and rhythm) and the harmony (the bass note and chord of each bar). All else is your decision: texture, register, figuration, which hand plays what, how loud each voice is. The aim is a piece that a pianist would want to play and that a listener knows as the song. Do not copy all detected notes, and do not use one safe pattern for each bar.
+**A sung tune: `tune`.** The note models do not read the vocal stem, so `roll` does not show the voice. `tune` follows the pitch of the lead voice (`lead.wav`: the vocal stem without backing vocals) and gives one note at a time:
 
-**Make the tune heard.** A piano has one timbre, so the tune needs help that the recording got from its instruments. You have three tools; use them together.
+```
+$A2P tune                 # each sung bar; also writes work/tune.json, a draft melody without the ? notes
+$A2P tune 9-16 --octave 1 # some bars, one octave higher (for a low voice)
+```
 
-- Position. The top note is the easiest to hear. But the tune can be in the middle or in the left hand: a tenor melody below right-hand figuration, a tune that goes from one hand to the other, a bass line that sings for a phrase. Select the place that suits the passage.
-- Velocity. Without offsets, each note has the velocity of the dynamic mark and the result is flat. Give each voice a level, then shape the notes:
-  - a level for a lane: `@ vel.lh=-14` in the header, or `23 @ vel.lh=-6 vel.rh2=-12` from a bar. About -6 to -12 is enough for balance. Do not move a lane far at the bar where the dynamic mark also changes: the two steps add;
-  - one note or chord: `E5:v+8`; one pitch of a chord: `C4^v-18+E4^v-18+G5` (soft harmony below a full top note);
-  - a tune in the left hand: make that lane louder and the right-hand figuration softer for those bars, then set them back;
-  - phrases: a hairpin is only drawn and does not change the sound, so shape a crescendo, the top of a phrase and its end with note offsets. Change the level of a mark with `@ vel.mf=84`.
-  - The sum for a note must be 1 to 127. `pno spec 3.5` has the rules.
-- Space. Keep the accompaniment out of the register of the tune, or make it thin where the tune is low.
+A `tune` line is `29 | 0:C#5/4^ 4:D4/2~ 6:D3/1? 7:D4/1~? 8:E5/3^? 12:B4/7`, in the `roll` slots. The marks:
 
-**Translate, do not transcribe, what a piano cannot do.** A sustained or tremolo note decays on a piano. Possible answers: hold it and let the other hand move; repeat it; a tremolo or a trill; an octave; a rolled chord (`:arp`); a fill or an echo in the gap. A counter-melody from the recording can stay as a second voice (`rh2`, `lh2`), move to the other hand, or become a fill between phrases.
+- `^`: the singer starts the note low (a scoop): one semitone low for up to 0.45 s, or two semitones low for up to 0.33 s, and no new syllable starts at the step up. `tune` writes the note at the start of the scoop, where the beat is.
+- `~`: the onset is late in its slot, so it can belong to the next slot.
+- `+` or `-`: the steady part of the note is 45 cents or more above or below the written pitch, so it is between two semitones. In 24 pop songs, 1 note in 10 had this mark; 6 of 10 of them were not the written pitch, and then usually the semitone in the direction of the mark.
+- `?`: the note is doubtful. It is shorter than 0.16 s; or 12 dB or more softer than a note within 1.5 s (a fading end, a breath, bleed); or an octave error (the stem has almost no sound at the pitch and much an octave higher); or an octave or more from the reliable notes around it.
 
-**Give the piece a shape.** Let the texture follow the form: a thin start, more motion or a wider register when a section returns, weight where the recording is loud (octaves in the bass, full chords, a doubled tune), air where it is quiet. Vary the figuration between sections: broken chords, a waltz bass, arpeggios that go through the two hands, block chords, a walking bass. A change must have a musical reason. The models give a different shape in each bar; that is detection noise, and it is not a reason.
+The first line gives the sung bars, the range and the count of each mark.
 
-**Give each section one left-hand figure.** There are two failures. One figure for the full piece: only the chord changes, and at the climax the bass only gets an octave, so the listener hears a loop. A new figure in each phrase: the texture never settles, and the piece loses its character. No figure is wrong; the amount of change is.
+- A bar with no line is not sung. Take the tune there from `roll` (an intro or a solo is often an instrument).
+- In pop songs, about 3 of 4 notes without `?` are the sung note in pitch and slot, and 8 of 10 within one slot; above 135 BPM, about 2 of 3. About 1 in 5 notes without `?` is false, and less than half of the `?` notes are true. Correct the rest with the parallel phrase.
+- Above 135 BPM (a sixteenth shorter than 0.11 s), `tune` writes the notes on eighths (even slots): a sung sixteenth there is lost. `bass` stays on sixteenths.
+- In these rules, a parallel phrase is the same phrase sung again, or played by an instrument (an intro or an outro often plays the tune).
+- `=25,41` after a bar: the voice sings the phrase of the bar again in bars 25 and 41. In pop songs 19 of 20 of these pairs were true, but `tune` finds only about half of the repeats: a bar without `=` can have one. Put the pairs that you confirm into `parallel` of `song.json`.
+  - A note that a `=` bar also has (same pitch, at most one slot away) is true in 9 of 10 cases; a note that no `=` bar has, in less than half. For a `?` note: 7 of 10, and 2 of 10.
+  - Do not add a note only because a `=` bar has it: it was right in 4 of 10 cases.
+  - Move a note to another slot only when two or more `=` bars have it at that slot and no `=` bar has it at its own slot (right about 3 times for each wrong). One `=` bar with another slot shows nothing.
+- `inst 1` under a bar: an instrument plays the phrase of the bar in bar 1. The line has the top notes of that bar as slot:pitch, in the octave of the tune, with the model letters of `roll`. `tune` finds this only where the note models hear the instrument clearly (piano and voice); in band recordings it finds almost none, also where an instrument plays the tune. The phrase often continues in the next bars: read `roll` there.
+- Take the rhythm from an `inst` line: its onsets are sharp, and the voice's are not. When a note there that `t` or `p` has (no letter, or a letter `t` or `p`) is one or two slots from the `tune` note of the same pitch, write its slot. A note with only `b` has no sharp onset. Tested on one song.
+- Without an `inst` line, do not move a `tune` note to a `roll` note of the same pitch: in pop songs that was wrong 2 times in 3.
+- A `^` note: keep it at its slot. Write the lower note at that slot and the main note one slot later only when a parallel phrase has the lower note. A real short pickup a step below the next note is also joined and marked `^`: about 1 in 5 `^` notes is one or two slots early, and then the lower note was a real note.
+- A `~` note: decide the slot with the parallel phrase. Without one, prefer the beat or the eighth position.
+- A `+` or `-` note: choose between the written pitch and the semitone above (`+`) or below (`-`) with the chord of the bar and the parallel phrase.
+- A `?` note an octave below the line is usually an octave error: write it an octave higher when a parallel phrase agrees. Some octave errors still have no `?`: read the line around each note.
+- Note lengths were not tested. A length to the next onset is safer than a long held value.
+- Notes with no gap between them can be one syllable (a melisma): keep the first note and the long ones.
+- `tune` starts a new note at each consonant inside one pitch (a dip in the level above 1 kHz); it finds about 6 of 10 repeated syllables on one pitch. A soft end or a breath gets `?`.
+- Add a `?` note only when a parallel phrase has it. Many `?` notes and leaps of a fourth, fifth or octave in one phrase mean backing vocals: follow the lead voice.
+- The line is in the sung octave. Put the tune where the piano carries it; `--octave 1` prints and saves it one octave higher.
+- Copy `work/tune.json` into `song.json` and correct it there. `tune` writes over `tune.json` each time.
 
-- A section is a large part of the form, such as a verse or a chorus, usually 8 bars or more. A phrase of 2 to 4 bars is not a section, and the second half of a section is not a new section.
-- Keep one figure for the full section. In a section, only vary it: a fill, a held chord or a walk at the end of a phrase, where the tune rests. A variation keeps the rhythm or the contour of the figure. A different figure in the middle of a section, such as a waltz bass after broken chords, is not a variation.
-- At a section boundary, change the rhythm or the contour. A new register or an added octave alone is not a change.
-- When a section returns, its left hand can repeat, become a variation, or become a new figure. A new figure needs a musical reason, for example more weight in a louder return.
-- Take the rhythm from the recording's bass and drums. A syncopation or an anticipation is better than even eighths.
-- Let the bass line move: passing notes and pickups between the detected bass notes. Use an inversion only where the recording has one.
-- `check` lists the left-hand rhythms with a count of bars for each. One rhythm in most bars of the piece is a loop. Many rhythms in one section is too much change.
-
-**Playable, not timid.**
-
-- One hand can take a tenth. A larger chord is possible when it is rolled or when the pedal holds the low note.
-- A leap is fine when the pedal or the tempo gives time for it.
-- The hands can cross or interlock when you intend it.
-- Fast octaves, wide arpeggios and full chords are normal piano writing. Match the difficulty to what the user asked for; if they did not say, an intermediate player is the default.
-
-**Stay honest to the recording.** Keep the tune and the bass as detected, and change them only on evidence (`peek`, a parallel bar). Take accompaniment notes from the chord of the bar, and prefer the chord notes that the models found: if a bar matches badly after you add notes, an added note is not in the chord of the recording. Record each liberty you take (a removed ornament, a moved octave, a new figure), because the report must list them.
-
-**Mark the phrasing.** The marks make the score easy to read, and the export plays them (`pno spec 3.7` has the syntax).
-
-- Slurs: put a slur over each phrase of the tune that you hear as one breath, usually 2 to 4 bars, and a short slur over a motif or a two-note sigh. A slur does not go over a rest or a clear break. `--phrase` takes a slur of two bars or longer in `rh` as a phrase.
-- Articulations: mark only what you can hear: `:st` for a short note, `:ten` for a held one, `:ac` for an accent. Do not mark each note.
-- Pedal: in the `ped` lane, change the pedal (`C`) where the harmony changes, and lift it where the recording is dry or the lines must stay clear.
-- Phrase marks: do not write a `phrase` line or run `pno phrase` unless the user asks for manual phrasing. Without that line, `--phrase` finds the phrases from the slurs, rests and cadences.
-
-### 5. Compare with the recording
-
-`$A2P compare song.pno` exports the score through `pno` and prints three sections. Run it after each group of edits; it exports again each time.
-
-| Section | What it measures | What it cannot tell you |
-|---|---|---|
-| HARMONY | Pitch classes of each beat, score against recording. | Nothing about octaves or the melody. It changes little when the right hand changes. |
-| NOTES | Score notes that no model has, and strong model notes that the score does not have. | It is circular: you wrote the score from these models. Use it to find invented notes and forgotten notes, not as proof. |
-| MELODY | For each half beat, if the high score notes are loud in the recording. | A held note that decayed shows as weak. Only a weak TOP note at its onset is a problem. |
-
-MELODY is the only independent test of the tune. When it disagrees with the score, look with `peek`, then change the note. `--bars 9,18` adds the pitch-class profile of bars with a low HARMONY value, to see which note is too strong or absent.
-
-### 6. Check the piano writing
-
-`$A2P check song.pno --song song.json` counts dead spots, left-hand leaps, spans larger than a tenth, right-hand jumps, crossed hands and different left-hand rhythms. With a song file it also lists melody notes that are absent, melody notes below another note, melody notes that are not louder than the other notes struck with them, parallel bars that differ, and notes outside the chords. It prints the velocity range of the score; a range of one value means that no voice has a level.
-
-The findings are places to look at, not rules. A crossing, a leap, a new figure or a tune below the top note is correct when you intended it. A melody note that is below another note or not louder than its accompaniment needs a velocity offset. Correct only what you did not intend. In a solo piano transcription, a finding that matches the recording is correct.
+Find the form first (which bars repeat), then the bass note and chord of each bar, then the melody. Write what you found to `work/song.json` now, before the score. `compare` and `check` test the score against this file, so it must come from the recording and not from the score.
 
 ```json
 {
@@ -143,41 +132,81 @@ The findings are places to look at, not rules. A crossing, a leap, a new figure 
 }
 ```
 
-`melody` is the tune as `bar:beat` (beat 1 is the first beat), in the octave where you put it, in either hand. `free_bars` are bars where a hold or a free figure is intended (intro, ending, a rest bar). Write this file from your reading of the recording before you re-voice anything, so that it does not follow the score.
+`melody` is the tune as `bar:beat` (beat 1 is the first beat), in the octave where you will put it, in either hand. `free_bars` are bars where a hold or a free figure is intended (intro, ending, a rest bar).
+
+### 4. Write the score
+
+Write `song.pno` with the `pno` skill: `@ key`, `@ time`, a tempo mark, `ped*`, then all bars. `pno fmt --fix` splits long notes into legal tied values.
+
+**Solo piano: transcribe.** Write what the pianist plays: the notes, voicing, register, figuration and hand split, with velocities that follow the velocities in `raw` (`pno spec 3.5` has the syntax). Do not add, remove or re-voice notes to make a better piece.
+
+**All other recordings, or when the user asks for an arrangement: arrange.** Read `arranging.md` in this skill folder before you write a note. Keep the tune and the bass as detected, and change them only on evidence (`peek`, a parallel bar). Record each change to the tune, the bass or a chord: the report must list them.
+
+**Mark slurs and articulations** in both cases. The export plays the marks (`pno spec 3.7` has the syntax).
+
+- Slurs over the phrases of the tune. `--phrase` takes a slur of two bars or longer in `rh` as a phrase.
+- Articulations: mark only what you can hear (`:st`, `:ten`, `:ac`). Do not mark each note.
+- Do not write a `phrase` line or run `pno phrase` unless the user asks for manual phrasing. `--phrase` finds the phrases itself.
+
+### 5. Compare with the recording
+
+`$A2P compare song.pno --song work/song.json` exports the score through `pno` and prints three sections. Run it again after each group of edits: its output is not valid for a score that changed. All rows are in `work/compare.txt`.
+
+| Section | What it prints | What it cannot tell you |
+|---|---|---|
+| HARMONY | Pitch classes of each beat, score against recording: the mean and the lowest bars. | Nothing about octaves or the melody. It changes little when the right hand changes. |
+| NOTES | The count of score notes that no model has, and of strong piano-model notes that the score does not have. It lists only the notes that are there in no octave. It also counts the sung notes of `tune` as model notes. | It is circular: you wrote the score from these models. Use it to find invented notes and forgotten notes, not as proof. |
+| MELODY | The tune notes of the song file that are weak in the recording at their onset, as `bar:beat pitch<louder pitch near it`. | It is not proof. In the test it marked 1 of 10 correct notes and 9 of 10 notes that were a semitone or a tone wrong. A low tune below loud harmony is marked more often. |
+
+MELODY is the only independent test of the tune. Look at each marked note with `peek`, then change the note or keep it. Without `--song`, MELODY tests the top score notes from A4 and cannot see a tune below that. `--bars 9,18` adds the pitch-class profile of bars with a low HARMONY value, to see which note is too strong or absent. If a bar matches badly after you add accompaniment notes, an added note is not in the chord of the recording.
+
+The score audio has the first tempo of the score. `compare` does not follow a later tempo mark in the score.
+
+### 6. Check the piano writing
+
+`$A2P check song.pno --song work/song.json` prints each finding with its count: dead spots, left-hand leaps, spans larger than a tenth, right-hand jumps, crossed hands and different left-hand rhythms. With the song file it also lists melody notes that are absent, below another note, or not louder than the notes struck with them, parallel bars that differ, and notes outside the chords. The line `[0]` names the tests that found nothing. With the melody of the song file it also prints the velocity range of the score; a range of one value means that no voice has a level. All rows are in `work/check.txt`.
+
+The findings are places to look at, not rules. A crossing, a leap, a new figure or a tune below the top note is correct when you intended it; in a solo piano transcription, a finding that matches the recording is correct. Correct only what you did not intend. A melody note that is below another note or not louder than its accompaniment needs a velocity offset.
+
+`pno sound` reports pitches one octave too high under an `8va` line (the MIDI export is correct, and `check` removes the `8va` lane before it reads the score).
 
 Then render (`pno render song.pno -o work/page.png`) and look at the pages.
 
 ### 7. Export, and each later pass
 
-The user judges by ear and by eye, so each version must reach them as files. After the first version, and after each pass that the user asks for, export the two files and confirm that their times changed:
+The user judges by ear and by eye, so each version must reach them as files. After the first version and after each later pass, also when the user did not ask again:
 
 ```
-pno export song.pno song.mid --humanize --phrase   # to listen
-pno export song.pno song.musicxml    # to open in a notation program
-ls -l song.mid song.musicxml
+pno export song.pno song.mid song.musicxml song.pdf song.mp4 --sound piano.sfz --humanize --phrase --colors RRGGBB,RRGGBB
 ```
 
-`--humanize` prints its seed; give it to the user, and use `--seed N` to export the same performance again. Use `--phrase` with no amount: a larger amount is for phrase marks that the user wrote. If a file time did not change, a program has the file open: export to a new name and tell the user. Do not finish a pass without the two exports, also when the user did not ask for them again.
+- One command writes the four files: the MIDI to listen, the MusicXML for a notation program, the PDF to read and print (through MuseScore), and the video to watch. The MIDI and the video play the same performance.
+- The video shows the notes falling onto a keyboard, with the audio of a sampled piano. It needs an SFZ piano: use the one that the user gave before; if you do not know one, ask the user one time for its path. Choose the two colours for the character of the recording, as the `pno` skill says (step 7). A video takes about half a minute for each minute of music.
+- `pno export` prints `wrote` for each file, and names each file that it cannot write, for example one that a player has open. Export that file to a new name and tell the user.
+- `--humanize` prints its seed; give it to the user (`--seed N` repeats the performance). Use `--phrase` with no amount: a larger amount is for phrase marks that the user wrote.
 
-Before a pass, copy the score (`cp song.pno work/v1.pno`, then `v2`, ...), so that the user can go back. Run `check` on the copy and on the new version to get a before and after table. After the pass, `diff` the `rh` lines against the copy: a re-voicing pass can remove a melody correction from an earlier pass without any check failing. If the pass moves the tune, keep the melody list of the copy and run `check` with it one time: it shows which melody notes moved.
+Before a pass, copy the score (`cp song.pno work/v1.pno`, then `v2`, ...), so that the user can go back. Run `check` on the copy and on the new version to get a before and after table. After the pass, `diff` the `rh` lines against the copy: a re-voicing pass can remove a melody correction from an earlier pass without any check failing. If the pass moves the tune, write a new `song.json` for the new version, and run `check` on the new version with the old file one time: it shows which melody notes moved.
 
 ### 8. Report
 
-Give the user:
+Give the user, in this order:
 
-- the tempo, meter, key, number of bars, and what the recording is (a solo piano, or an ensemble that you arranged);
+- the names of the exported MIDI, MusicXML, PDF and video files. You cannot hear the result; their ear is the last test;
+- the tempo, meter, key, number of bars, which grid you used, and what the recording is (a solo piano, or an ensemble that you arranged, and for which difficulty);
 - the HARMONY mean and the lowest bars, and the before and after table of `check`;
-- each place where the score leaves the recording for piano reasons, so that they can undo it;
-- the notes you are least sure of;
-- the names of the exported MIDI and MusicXML files, first in the report. You cannot hear the result; their ear is the last test.
-
-## Traps
-
-- After `pno export`, confirm that the file time changed. If a player has the file open, `pno export` can print `wrote` and write nothing. `compare` deletes its targets first for this reason.
-- `pno sound` reports pitches one octave too high under an `8va` line. The MIDI export is correct. `check` removes the `8va` lane before it reads the score.
-- Do not run `pno import song.musicxml` next to the score to test the export: it writes `song.pno` and replaces your score.
-- `compare` reads the score through MuseScore. If you edit the score and do not run `compare` again, you read old numbers.
+- each place where the tune, the bass or a chord differs from the recording, so that they can undo it;
+- the notes you are least sure of.
 
 ## Limits
 
-Tested on one recording: 3/4, steady tempo, no drums, no vocals. Not tested: 4/4 and compound meters, a pickup, a vocal melody, a recording with drums, rubato. Tell the user when a song is outside the tested range.
+The numbers in this file come from rendered piano and ensemble clips, solo singing, two real songs and 24 pop songs (62 to 182 BPM) with known notes. Known failures:
+
+- Slow, free piano playing: the notes were correct, but the tracked grid was not. The tracker changed between two beat levels.
+- The beat level and the first beat of bar 1 are often wrong. The grid fields correct most of them; some need `shift`, and a few grids no field corrects.
+- A sung tune (`tune`): a `^` note can be one or two slots early, and a note reached by a step up with no gap one or two slots late. A repeated syllable on one pitch with a soft consonant stays one note. Backing vocals that the lead-voice model keeps give octave errors.
+- A synth bass can go to the `other` stem. Then the bass field and the `bass` line are poor, and nothing detects it: compare the bass field with the low `roll` notes.
+- Drums can leak into a bass stem with a sparse bass part: then about half of the line is false (the bass field of the bar stays correct).
+- Velocities come from `backing.wav`, so a song with a voice and drums has fewer `!` notes than before.
+- Not tested: a pickup, swing, a meter change, compound meters for `tune`, an upright bass, the lengths of `tune` notes.
+
+Tell the user when a song is outside the tested range.

@@ -55,6 +55,8 @@ pub struct Performance {
     pub volume: Option<u8>,
     pub pan: Option<u8>,
     pub end: f64,
+    // The start of each played bar.
+    pub bars: Vec<f64>,
 }
 
 pub struct Played {
@@ -309,6 +311,7 @@ pub fn perform(a: &Analysis, opts: &Options) -> Result<Performance, String> {
         notes,
         pedal,
         end: last + tail,
+        bars: order.iter().map(|i| i.start + lead).collect(),
         tempo: tempo.points.iter().map(|&(t, q)| (later(t), q)).collect(),
         meters: meters(a.score, &order)
             .into_iter()

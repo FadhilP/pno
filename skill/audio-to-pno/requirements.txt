@@ -10,5 +10,11 @@ demucs==4.1.0
 piano-transcription-inference==0.0.6
 onnxruntime==1.23.2
 basic-pitch[onnx]==0.4.0
-# basic-pitch imports pkg_resources, which setuptools 81 removed
+# basic-pitch and transkun import pkg_resources, which setuptools 81 removed
 setuptools<81
+beat-this==1.1.0
+# transkun needs ncls; ncls 0.0.70 and later have no Windows wheel for Python 3.10 and need a C compiler
+ncls==0.0.68
+transkun==2.0.1
+# the lead voice for `tune` (a karaoke model); it pins rotary-embedding-torch below 0.7, which gives beat-this the same beats
+audio-separator[cpu]==0.48.0

@@ -231,10 +231,30 @@ fn export_options_name_the_formats_they_apply_to() {
     let run = pno(&["export", path(&score), path(&pdf), "--humanize"]);
     assert_eq!(run.code, 2);
     assert!(
-        run.stderr.contains("only to MIDI and audio"),
+        run.stderr.contains("only to MIDI, audio and video"),
         "{}",
         run.stderr
     );
+    let mp4 = dir.join("x.mp4");
+    let run = pno(&["export", path(&score), path(&mp4)]);
+    assert_eq!(run.code, 2);
+    assert!(
+        run.stderr.contains("a video needs --sound"),
+        "{}",
+        run.stderr
+    );
+    let sfz = write(&dir, "piano.sfz", "");
+    let run = pno(&[
+        "export",
+        path(&score),
+        path(&mp4),
+        "--sound",
+        path(&sfz),
+        "--colors",
+        "5CC478",
+    ]);
+    assert_eq!(run.code, 2);
+    assert!(run.stderr.contains("two hex colours"), "{}", run.stderr);
     let wav = dir.join("x.wav");
     let sf2 = write(&dir, "piano.sf2", "");
     let run = pno(&["export", path(&score), path(&wav), "--sound", path(&sf2)]);
@@ -879,5 +899,41 @@ fn pno_phrase_skips_the_pickup_and_starts_a_phrase_at_its_upbeat() {
         ),
         "the short slur from the pickup is no phrase:\n{}",
         run.stdout
+    );
+}
+
+#[test]
+fn one_export_writes_several_files_and_reports_each_failure() {
+    let dir = temp_dir("play-many");
+    let score = root().join("tests/fixtures/tristesse.pno");
+    let (mid, xml) = (dir.join("a.mid"), dir.join("a.musicxml"));
+    let lost = dir.join("no-such-folder").join("b.mid");
+    let run = pno(&[
+        "export",
+        path(&score),
+        path(&lost),
+        path(&mid),
+        path(&xml),
+        "--humanize",
+        "--seed",
+        "7",
+    ]);
+    assert_eq!(run.code, 1, "{}", run.stdout);
+    assert!(run.stderr.contains("no-such-folder"), "{}", run.stderr);
+    let single = dir.join("single.mid");
+    let one = pno(&[
+        "export",
+        path(&score),
+        path(&single),
+        "--humanize",
+        "--seed",
+        "7",
+    ]);
+    assert_eq!(one.code, 0, "{}", one.stderr);
+    let read = |p: &std::path::Path| std::fs::read(p).expect("an exported file");
+    assert_eq!(read(&mid), read(&single), "the same performance");
+    assert!(
+        read(&xml).starts_with(b"<?xml"),
+        "the MusicXML is written too"
     );
 }
