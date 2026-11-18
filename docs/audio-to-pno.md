@@ -41,7 +41,7 @@ The setup output goes to stderr, so the output of `a2p.py` stays clean. A new `p
 | `tk.json`, `pt.json`, `bp.json` | steps `tk`, `pt`, `bp` | Notes of Transkun, piano_transcription_inference and basic-pitch |
 | `bass.json`, `bp_bass.json` | step `bass` | basic-pitch notes of the bass stem |
 | `chords.npy` | step `chords` | BTC chord probabilities for each frame |
-| `grid.json` | `grid --set` or `grid --constant` | The bar grid that all later commands read |
+| `grid.json` | `grid --set` or `grid --constant` | The bar grid that all later commands read: beats in a bar, quarters in a beat, the beat times, and `bars` (`{"57": 2}`) for the bars of another length, if there are any |
 | `tune.json` | `tune` | Draft melody without doubtful notes |
 | `compare.txt`, `check.txt` | `compare`, `check` | All rows of their lists |
 | `cqt.npy`, `cqt_lead.npy`, `f0_lead.npy` | first use | Caches; `prepare` deletes them |
@@ -52,7 +52,7 @@ The setup output goes to stderr, so the output of `a2p.py` stays clean. A new `p
 |---|---|
 | `prepare AUDIO` | Converts the audio, then runs the steps: `stems` and `beats` first, then `tk`, `pt`, `bp`, `bass`, `lead` and `chords` at the same time. Each step is a separate process with its own numba cache. |
 | `step NAME` | Runs one step again, for example for a folder made before that step existed |
-| `grid` | Fits a bar grid to the tracked beats and the note onsets, and compares it with a constant grid. `--set FIELD=VALUE` corrects and saves it. |
+| `grid` | Fits a bar grid to the tracked beats and the note onsets, and compares it with a constant grid. It finds bars of another length where the tracked downbeats move to another beat (`phase_path`, `odd_bars`), and places each with the chord changes. `--set FIELD=VALUE` corrects and saves it (`bar=N:beats` gives the bars of another length). |
 | `roll [BARS]` | Each bar: the chord, the bass note and the model notes, merged across the models. Letters show which models have a note. |
 | `raw [BARS]` | The model notes with exact positions and velocities, not merged |
 | `bass [BARS]` | The bass line of the bass stem, in the format of `tune` |
@@ -67,11 +67,11 @@ The file has one section for each area, marked with `# ----` lines:
 
 | Section | Main functions |
 |---|---|
-| (top) | Constants with the reason for each value, `Grid` (the bar grid of a song), `combined` and `viewed` (model notes) |
+| (top) | Constants with the reason for each value, `Grid` (the bar grid of a song: all bar positions come from its `odd` bars) and `saved_grid`, `combined` and `viewed` (model notes) |
 | prepare | `run_stems`, `run_beat_tracker`, `run_lead`, `run_transkun`, `run_pt`, `run_basic_pitch`, `run_bass`, `run_chords` (`btc_logits` is the BTC forward pass), `cmd_prepare` |
 | sung tune | `vocal_f0` (pYIN on `lead.wav`), `semitone_path` (Viterbi), `sung_notes` (syllable cuts, scoop joins, loud starts, soft notes), `octave_errors`, `on_grid`, `parallel_bars`, `cmd_tune` |
 | bass line | `bass_line`, `cmd_bass` |
-| grid | `repair`, `cover`, `snap`, `bar_phase`, `tracked_grid`, `cmd_grid` |
+| grid | `repair`, `cover`, `snap`, `phase_path`, `bar_phase`, `line_evidence`, `odd_bars`, `tracked_grid`, `cmd_grid` |
 | evidence | `merged`, `bar_bass`, `chord`, `bar_chord`, `cmd_roll`, `cmd_raw` |
 | compare | `score_notes`, `cmd_compare` |
 | check | `bar_cells` (the cells of each bar, with meter changes and incomplete bars), `onsets` (reads `pno sound --velocity`), `cmd_check` |

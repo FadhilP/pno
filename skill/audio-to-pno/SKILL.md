@@ -50,6 +50,7 @@ The report tells you what the recording is. Do not trust the title, and do not u
    - The line `the tracker changed between two beat levels` means that the grid has the faster level.
    - Two levels can both be correct (4/4 at 150 with eighths, or at 75 with sixteenths). Tell the user which you used.
 3. **Bar length and bar 1.** `--set beats_per_bar=4` changes the bar length. `--set shift=1` starts bar 1 one beat later (`shift=-1`: earlier). Do this when less than 80% of the tracked downbeats agree, or when `roll` shows the bass after slot 0. Do not use a pickup bar while you work: if the music starts before a downbeat, bar 1 starts with rests. You can change it to a pickup bar after the last check.
+4. **Bars of another length.** The line `bars of another length` means that the tracked downbeats moved to another beat, and the grid has one shorter or longer bar there. In tests, the bar was the right one in 6 of 10 cases, and at most one bar off in 8 of 10. Look at 3 bars to each side with `roll`: after the right bar, the bass is at slot 0 and the chords change at bar starts. To move a bar, or to add a bar that you hear, give all such bars: `--set bar=33:2 bar=59-66:3` (`bar=1:4` means none). The bar fields replace all found bars. A 6-beat bar can show as a 2-beat bar some bars later: use `bar=N:6`. If a beat near the found bar is two times as long as the others, the tracker lost a beat and the music has no odd bar. Keep the found bar, because the later bars need it. In the score, give that bar its own `time=`, and give the next bar the usual `time=`.
 
 Fields go together, and the level fields come first: `$A2P grid --constant --set level=half beats_per_bar=4 shift=2`.
 
@@ -207,6 +208,7 @@ The numbers in this file come from rendered piano and ensemble clips, solo singi
 - A synth bass can go to the `other` stem. Then the bass field and the `bass` line are poor, and nothing detects it: compare the bass field with the low `roll` notes.
 - Drums can leak into a bass stem with a sparse bass part: then about half of the line is false (the bass field of the bar stays correct).
 - Velocities come from `backing.wav`, so a song with a voice and drums has fewer `!` notes than before.
-- Not tested: a pickup, swing, a meter change, compound meters for `tune`, an upright bass, the lengths of `tune` notes.
+- Bars of another length: no false one in 93 songs with regular bars. `grid` does not find a section in another meter (it finds only the net move: give the section with `bar=A-B:n`), a 2-beat bar when the tracker marks half bars as downbeats, or a change when the tracker keeps its bar phase.
+- Not tested: a pickup, swing, compound meters for `tune`, an upright bass, the lengths of `tune` notes.
 
 Tell the user when a song is outside the tested range.
