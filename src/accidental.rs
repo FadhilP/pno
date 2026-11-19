@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::analysis::{Analysis, NoteRef, Part};
 use crate::frac::Frac;
-use crate::model::{Key, Note, Staff};
+use crate::model::{Key, Note, Ottava, Staff};
 
 const SHARP_ORDER: [u8; 7] = [3, 0, 4, 1, 5, 2, 6];
 const FLAT_ORDER: [u8; 7] = [6, 2, 5, 1, 4, 0, 3];
@@ -43,7 +43,8 @@ fn staff_bar(a: &Analysis, bar: usize, staff: Staff, out: &mut HashSet<NoteRef>)
                         part: Part::Grace(gi),
                         note: ni,
                     };
-                    items.push(((leaf.start, -1000 + gi as i32), r, n, leaf.start));
+                    let rank = i32::try_from(gi).expect("an event has few grace groups");
+                    items.push(((leaf.start, -1000 + rank), r, n, leaf.start));
                 }
             }
         }
@@ -63,7 +64,8 @@ fn staff_bar(a: &Analysis, bar: usize, staff: Staff, out: &mut HashSet<NoteRef>)
                         part: Part::After(gi),
                         note: ni,
                     };
-                    items.push(((leaf.end(), -2000 + gi as i32), r, n, leaf.start));
+                    let rank = i32::try_from(gi).expect("an event has few grace groups");
+                    items.push(((leaf.end(), -2000 + rank), r, n, leaf.start));
                 }
             }
         }
@@ -72,7 +74,7 @@ fn staff_bar(a: &Analysis, bar: usize, staff: Staff, out: &mut HashSet<NoteRef>)
     let key = a.bars[bar].key;
     let mut state: HashMap<i32, i8> = HashMap::new();
     let position = |n: &Note, t: Frac| {
-        let shift = a.ottava_at(staff, bar, t).map_or(0, |o| o.shift());
+        let shift = a.ottava_at(staff, bar, t).map_or(0, Ottava::shift);
         i32::from(n.pitch.step) + 7 * i32::from(n.pitch.octave - shift)
     };
     let mut i = 0;

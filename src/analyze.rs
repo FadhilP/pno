@@ -224,8 +224,8 @@ pub fn sound(
             .map(|p| p.action)
             .collect();
         let has = |x| actions.contains(&x);
-        let pedal = if has(PedalAction::Change) || has(PedalAction::Stop) && has(PedalAction::Start)
-        {
+        let up_and_down = has(PedalAction::Stop) && has(PedalAction::Start);
+        let pedal = if has(PedalAction::Change) || up_and_down {
             "  [pedal change]"
         } else if has(PedalAction::Start) {
             "  [pedal down]"
@@ -391,13 +391,12 @@ fn hand_text(score: &Score, bar: usize, hand: Staff) -> String {
         .filter(|l| l.lane.is_voice() && l.lane.staff() == Some(hand))
         .collect();
     lines.sort_by_key(|l| l.lane.order());
-    lines
-        .iter()
-        .map(|l| {
-            let text = write_line(l.lane, &l.els, &b.layout).unwrap_or_default();
-            format!("{} {text}\n", l.lane)
-        })
-        .collect()
+    let mut out = String::new();
+    for l in lines {
+        let text = write_line(l.lane, &l.els, &b.layout).unwrap_or_default();
+        let _ = writeln!(out, "{} {text}", l.lane);
+    }
+    out
 }
 
 fn repeats(score: &Score, bars: &[usize], out: &mut String) {

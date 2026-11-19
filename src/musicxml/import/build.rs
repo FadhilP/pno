@@ -82,7 +82,7 @@ fn meter_cells(meter: &mut Meter, m: &SrcMeasure, rep: &mut Report) -> Result<Ve
         return Err(stop(&format!("the time signature {meter}"), &m.number));
     }
     let pattern = beam_pattern(meter, m).unwrap_or_else(|| {
-        let threes = if num % 2 == 1 { 1 } else { 0 };
+        let threes = u32::from(num % 2 == 1);
         let mut p = vec![2; ((num - 3 * threes) / 2) as usize];
         p.extend(std::iter::repeat_n(3, threes as usize));
         p
@@ -122,20 +122,18 @@ fn beam_pattern(meter: &Meter, m: &SrcMeasure) -> Option<Vec<u32>> {
     }
     let p: Option<Vec<u32>> = groups
         .iter()
-        .map(|g| g.is_int().then(|| g.num() as u32))
+        .map(|g| {
+            g.is_int()
+                .then_some(g.num())
+                .and_then(|n| u32::try_from(n).ok())
+        })
         .collect();
     let p = p?;
     (p.iter().all(|g| matches!(g, 2 | 3)) && p.iter().sum::<u32>() == meter.numerator())
         .then_some(p)
 }
 
-fn layout_of(
-    meter: &Meter,
-    cells: &[Frac],
-    m: &SrcMeasure,
-    first: bool,
-    prev: Option<&Layout>,
-) -> Result<Layout, String> {
+fn layout_of(meter: &Meter, cells: &[Frac], m: &SrcMeasure, prev: Option<&Layout>) -> Layout {
     let nominal: Frac = cells.iter().copied().sum();
     let len = if m.end.is_zero() { nominal } else { m.end };
     let base = BarLayout {
@@ -146,11 +144,11 @@ fn layout_of(
         full: nominal,
     };
     if len == nominal {
-        return Ok(Layout {
+        return Layout {
             layout: base,
             cells_attr: None,
             second_part: false,
-        });
+        };
     }
     if len > nominal {
         let mut out = Vec::new();
@@ -163,19 +161,20 @@ fn layout_of(
             sum += *c;
         }
         // A cadenza bar that ends inside a cell ends with `x`, as a split bar does.
-        return Ok(Layout {
-            cells_attr: Some(out.len() as u32),
+        return Layout {
+            cells_attr: Some(u32::try_from(out.len()).expect("a bar has fewer than 2^32 cells")),
             layout: BarLayout {
                 cells: out,
                 trail: sum - len,
                 ..base
             },
             second_part: false,
-        });
+        };
     }
     let prev_open =
         prev.is_some_and(|p| p.layout.is_partial() && !p.second_part && p.cells_attr.is_none());
     let second = prev_open && prev.is_some_and(|p| p.layout.length() + len == nominal);
+    let first = prev.is_none();
     let from_end = first || second;
     let mut k = 0;
     let mut sum = Frac::ZERO;
@@ -194,8 +193,9 @@ fn layout_of(
         (cells[..k].to_vec(), Frac::ZERO, sum - len)
     };
     let whole_cells_at_end = !from_end && trail.is_zero();
-    Ok(Layout {
-        cells_attr: whole_cells_at_end.then_some(k as u32),
+    Layout {
+        cells_attr: whole_cells_at_end
+            .then(|| u32::try_from(k).expect("a meter has fewer than 2^32 cells")),
         layout: BarLayout {
             cells: chosen,
             lead,
@@ -203,7 +203,7 @@ fn layout_of(
             ..base
         },
         second_part: second,
-    })
+    }
 }
 
 struct VoiceLeaf<'s> {
@@ -212,6 +212,12 @@ struct VoiceLeaf<'s> {
     src: Vec<&'s SrcNote>,
     graces: Vec<Vec<&'s SrcNote>>,
     afters: Vec<Vec<&'s SrcNote>>,
+}
+
+#[derive(Clone, Copy)]
+enum HomeStaff {
+    ByVoiceNumber,
+    ByNoteCount,
 }
 
 // MuseScore and pno number the voices 1 to 4 on the upper staff and 5 to 8 on the lower staff.
@@ -226,19 +232,20 @@ fn staff_by_number(voice: &str) -> Option<Staff> {
 fn group_voices<'s>(
     m: &'s SrcMeasure,
     number: &str,
-    by_number: bool,
+    home_staff: HomeStaff,
 ) -> Result<Vec<(Lane, Vec<&'s SrcNote>)>, String> {
-    let mut order: Vec<String> = Vec::new();
-    let mut by_voice: HashMap<String, Vec<&SrcNote>> = HashMap::new();
+    let mut order: Vec<&str> = Vec::new();
+    let mut by_voice: HashMap<&str, Vec<&SrcNote>> = HashMap::new();
     for n in &m.notes {
-        if !by_voice.contains_key(&n.voice) {
-            order.push(n.voice.clone());
+        let voice = n.voice.as_str();
+        if !by_voice.contains_key(voice) {
+            order.push(voice);
         }
-        by_voice.entry(n.voice.clone()).or_default().push(n);
+        by_voice.entry(voice).or_default().push(n);
     }
-    let mut staffs: [Vec<(String, Vec<&SrcNote>)>; 2] = [Vec::new(), Vec::new()];
+    let mut staffs: [Vec<(&str, Vec<&SrcNote>)>; 2] = [Vec::new(), Vec::new()];
     for v in order {
-        let notes = by_voice.remove(&v).unwrap_or_default();
+        let notes = by_voice.remove(v).unwrap_or_default();
         let visible: Vec<&&SrcNote> = notes.iter().filter(|n| n.head != SrcHead::Hidden).collect();
         if visible.is_empty() {
             continue;
@@ -250,9 +257,10 @@ fn group_voices<'s>(
             std::cmp::Ordering::Less => Staff::Lower,
             std::cmp::Ordering::Equal => visible[0].staff,
         };
-        let home = staff_by_number(&v)
-            .filter(|_| by_number)
-            .unwrap_or(by_count);
+        let home = match home_staff {
+            HomeStaff::ByVoiceNumber => staff_by_number(v).unwrap_or(by_count),
+            HomeStaff::ByNoteCount => by_count,
+        };
         staffs[usize::from(home.number() - 1)].push((v, notes));
     }
     let mut out = Vec::new();
@@ -263,7 +271,8 @@ fn group_voices<'s>(
             return Err(stop("more than four voices on a staff", number));
         }
         for (k, (_, notes)) in list.drain(..).enumerate() {
-            out.push((Lane::Voice(staff, k as u8 + 1), notes));
+            let voice = u8::try_from(k + 1).expect("a staff has at most four voices");
+            out.push((Lane::Voice(staff, voice), notes));
         }
     }
     Ok(out)
@@ -346,7 +355,7 @@ struct Ctx<'r> {
     rep: &'r mut Report,
     keep: Keep,
     accidentals: bool,
-    number: String,
+    number: &'r str,
 }
 
 impl Ctx<'_> {
@@ -450,16 +459,15 @@ fn group_leaves(
             close_implicit(&mut open, &groups);
         }
         for t in first.tuplets.iter().filter(|t| t.edge == Edge::Start) {
-            let ratio = match t.ratio {
-                Some(r) => r,
-                None => {
-                    let (a, n) = first.time_mod.unwrap_or((1, 1));
-                    let own = Frac::new(i64::from(a), i64::from(n)) / outer(&open, &groups);
-                    if open.is_empty() {
-                        (a, n)
-                    } else {
-                        (own.num() as u32, own.den() as u32)
-                    }
+            let ratio = if let Some(r) = t.ratio {
+                r
+            } else {
+                let (a, n) = first.time_mod.unwrap_or((1, 1));
+                let own = Frac::new(i64::from(a), i64::from(n)) / outer(&open, &groups);
+                if open.is_empty() {
+                    (a, n)
+                } else {
+                    frac_ratio(own, number)?
                 }
             };
             if ratio.0 < 2 {
@@ -499,15 +507,15 @@ fn group_leaves(
                     return Err(stop("a tuplet whose notes do not have its ratio", number));
                 }
                 close_implicit(&mut open, &groups);
-                let own = want / outer(&open, &groups);
+                let ratio = frac_ratio(want / outer(&open, &groups), number)?;
                 open.push(groups.len());
                 groups.push(Group {
                     head: GroupHead::Tuplet {
-                        num: own.num() as u32,
-                        ratio: Some(own.den() as u32),
+                        num: ratio.0,
+                        ratio: Some(ratio.1),
                         look: crate::model::TupletLook::Default,
                     },
-                    ratio: (own.num() as u32, own.den() as u32),
+                    ratio,
                     members: Vec::new(),
                     implicit: true,
                     number: 0,
@@ -555,21 +563,23 @@ fn group_leaves(
     Ok((paths, groups.iter().map(|g| g.head).collect()))
 }
 
+fn frac_ratio(f: Frac, number: &str) -> Result<(u32, u32), String> {
+    let part = |v: i64| u32::try_from(v).map_err(|_| stop("a tuplet ratio this large", number));
+    Ok((part(f.num())?, part(f.den())?))
+}
+
 fn nest(items: Vec<(Vec<usize>, El)>, depth: usize, heads: &[GroupHead]) -> Vec<El> {
     let mut out: Vec<El> = Vec::new();
-    let mut i = 0;
-    let items: Vec<(Vec<usize>, El)> = items;
-    while i < items.len() {
-        let Some(g) = items[i].0.get(depth).copied() else {
-            out.push(items[i].1.clone());
-            i += 1;
+    let mut items = items.into_iter().peekable();
+    while let Some((path, el)) = items.next() {
+        let Some(g) = path.get(depth).copied() else {
+            out.push(el);
             continue;
         };
-        let mut j = i;
-        while j < items.len() && items[j].0.get(depth) == Some(&g) {
-            j += 1;
+        let mut members = vec![(path, el)];
+        while let Some(member) = items.next_if(|(p, _)| p.get(depth) == Some(&g)) {
+            members.push(member);
         }
-        let members: Vec<(Vec<usize>, El)> = items[i..j].to_vec();
         let start = members[0].1.start;
         let end = members[members.len() - 1].1.end();
         let children = nest(members, depth + 1, heads);
@@ -578,7 +588,6 @@ fn nest(items: Vec<(Vec<usize>, El)>, depth: usize, heads: &[GroupHead]) -> Vec<
             dur: end - start,
             kind: ElKind::Group(heads[g], children),
         });
-        i = j;
     }
     out
 }
@@ -619,7 +628,7 @@ fn fill_groups(els: Vec<El>) -> Vec<El> {
                     kind: ElKind::Group(h, c),
                 }
             }
-            k => El { kind: k, ..e },
+            k @ ElKind::Tok(_) => El { kind: k, ..e },
         })
         .collect()
 }
@@ -667,10 +676,10 @@ fn voice_line(
     level: &dyn Fn(Frac) -> f64,
     toks: &mut BTreeMap<TokKey, TokSrc>,
 ) -> Result<Vec<El>, String> {
-    let number = cx.number.clone();
+    let number = cx.number;
     let home = lane.staff().unwrap_or(Staff::Upper);
-    let leaves = voice_leaves(notes, layout.lead, &number)?;
-    let (paths, heads) = group_leaves(&leaves, &number)?;
+    let leaves = voice_leaves(notes, layout.lead, number)?;
+    let (paths, heads) = group_leaves(&leaves, number)?;
     let ratios: Vec<(u32, u32)> = heads.iter().map(|h| ratio_of(*h)).collect();
     let mut cursor = layout.lead;
     let mut items: Vec<(Vec<usize>, El)> = Vec::new();
@@ -678,13 +687,13 @@ fn voice_line(
         && leaves[0].src[0].head == SrcHead::BarRest
         && leaves[0].start == layout.lead
         && leaves[0].dur == layout.length();
-    for (leaf, path) in leaves.iter().zip(&paths) {
+    for (leaf, path) in leaves.iter().zip(paths) {
         if leaf.start < cursor {
-            return Err(stop("notes that overlap in one voice", &number));
+            return Err(stop("notes that overlap in one voice", number));
         }
         cursor = leaf.start + leaf.dur;
         let first = leaf.src[0];
-        let f = factor(path, &ratios);
+        let f = factor(&path, &ratios);
         if first.head != SrcHead::Hidden && first.head != SrcHead::BarRest {
             let written = leaf.dur * f;
             let ok = match first.written {
@@ -694,14 +703,14 @@ fn voice_line(
             if !ok {
                 return Err(stop(
                     "a note whose written value does not match its duration",
-                    &number,
+                    number,
                 ));
             }
         }
         let head = match &first.head {
             SrcHead::Hidden => {
                 items.push((
-                    path.clone(),
+                    path,
                     El {
                         start: leaf.start,
                         dur: leaf.dur,
@@ -742,43 +751,13 @@ fn voice_line(
             slurs: Slurs::default(),
             after,
         };
-        let mut src = TokSrc {
-            end: leaf.start + leaf.dur,
-            ..TokSrc::default()
-        };
-        let mut record = |part: Part, notes: &[&SrcNote]| {
-            let pitched: Vec<&&SrcNote> = notes
-                .iter()
-                .filter(|n| matches!(n.head, SrcHead::Pitch(_)))
-                .collect();
-            for (k, n) in pitched.iter().enumerate() {
-                if n.tie_start {
-                    src.tie_starts.push((part, k));
-                }
-            }
-            let vels: Vec<f64> = pitched
-                .iter()
-                .map(|n| n.velocity.unwrap_or_else(|| level(n.start + layout.lead)))
-                .collect();
-            src.velocities.push((part, vels));
-            for n in notes {
-                src.slurs.extend(n.slurs.iter().map(|s| (part, *s)));
-            }
-        };
-        for (i, g) in leaf.graces.iter().enumerate() {
-            record(Part::Grace(i), g);
-        }
-        record(Part::Main, &leaf.src);
-        for (i, g) in leaf.afters.iter().enumerate() {
-            record(Part::After(i), g);
-        }
         toks.insert(
             TokKey {
                 bar,
                 lane,
                 start: leaf.start,
             },
-            src,
+            tok_src(leaf, layout, level),
         );
         let el = El {
             start: leaf.start,
@@ -788,7 +767,7 @@ fn voice_line(
         if head_is_bar_rest(&el) {
             return Ok(vec![el]);
         }
-        items.push((path.clone(), el));
+        items.push((path, el));
     }
     if cx.keep.beams {
         split_beams(&leaves, &mut items);
@@ -796,9 +775,43 @@ fn voice_line(
     let nested = fill_groups(nest(items, 0, &heads));
     let end = layout.total() - layout.trail;
     if cursor > end {
-        return Err(stop("a voice that is longer than its measure", &number));
+        return Err(stop("a voice that is longer than its measure", number));
     }
     Ok(with_x(nested, layout))
+}
+
+fn tok_src(leaf: &VoiceLeaf, layout: &BarLayout, level: &dyn Fn(Frac) -> f64) -> TokSrc {
+    let mut src = TokSrc {
+        end: leaf.start + leaf.dur,
+        ..TokSrc::default()
+    };
+    let mut record = |part: Part, notes: &[&SrcNote]| {
+        let pitched: Vec<&&SrcNote> = notes
+            .iter()
+            .filter(|n| matches!(n.head, SrcHead::Pitch(_)))
+            .collect();
+        for (k, n) in pitched.iter().enumerate() {
+            if n.tie_start {
+                src.tie_starts.push((part, k));
+            }
+        }
+        let vels: Vec<f64> = pitched
+            .iter()
+            .map(|n| n.velocity.unwrap_or_else(|| level(n.start + layout.lead)))
+            .collect();
+        src.velocities.push((part, vels));
+        for n in notes {
+            src.slurs.extend(n.slurs.iter().map(|s| (part, *s)));
+        }
+    };
+    for (i, g) in leaf.graces.iter().enumerate() {
+        record(Part::Grace(i), g);
+    }
+    record(Part::Main, &leaf.src);
+    for (i, g) in leaf.afters.iter().enumerate() {
+        record(Part::After(i), g);
+    }
+    src
 }
 
 fn beam_state(notes: &[&SrcNote], level: u8) -> Option<BeamState> {
@@ -879,12 +892,12 @@ impl Marks {
     }
 
     fn busy(&self, lane: Lane, t: Frac, open: &[OpenSpan]) -> bool {
-        let starts = self.lanes.get(&lane).is_some_and(|items| {
-            items
-                .iter()
-                .any(|i| i.start == t || i.end.is_some_and(|e| i.start < t && t < e))
-        });
-        starts || open.iter().any(|o| o.lane == lane)
+        let covers = |i: &Item| i.end.is_some_and(|e| i.start < t && t < e);
+        let taken = self
+            .lanes
+            .get(&lane)
+            .is_some_and(|items| items.iter().any(|i| i.start == t || covers(i)));
+        taken || open.iter().any(|o| o.lane == lane)
     }
 
     fn lane_for(&self, staff: Staff, kind: MarkKind, t: Frac, open: &[OpenSpan]) -> Option<Lane> {
@@ -910,12 +923,11 @@ fn mark_lines(
     bar: usize,
     marks_out: &mut Vec<MarkVelocity>,
 ) -> Result<Vec<Line>, String> {
-    let number = cx.number.clone();
+    let number = cx.number;
     let lead = layout.lead;
     let end = layout.total() - layout.trail;
     let mut marks = Marks::default();
-    let carried = std::mem::take(open);
-    for o in &carried {
+    for o in open.iter() {
         marks.push(
             o.lane,
             Item {
@@ -925,7 +937,6 @@ fn mark_lines(
             },
         );
     }
-    *open = carried;
     // Span numbers repeat across staves (MuseScore numbers each staff from 1): a stop closes
     // the span of its own staff first.
     let close = |marks: &mut Marks,
@@ -971,13 +982,11 @@ fn mark_lines(
     for d in dirs {
         let t = d.t + lead;
         if t > end {
-            return Err(stop("a direction after the end of the measure", &number));
+            return Err(stop("a direction after the end of the measure", number));
         }
         match &d.kind {
             DirKind::Dyn { mark, velocity } => {
-                let lane = marks
-                    .lane_for(d.staff, MarkKind::Dyn, t, open)
-                    .ok_or_else(|| stop("four dynamic marks at one time", &number))?;
+                let lane = dyn_lane(&marks, cx.rep, d.staff, t, open, number)?;
                 let item_end = mark.mark.is_momentary().then(|| {
                     onsets
                         .iter()
@@ -986,11 +995,7 @@ fn mark_lines(
                         .min()
                         .unwrap_or(end)
                 });
-                let first_lane = Lane::Mark(d.staff, MarkKind::Dyn, 1);
-                if lane != first_lane && marks.starts_at(first_lane, t) {
-                    cx.rep.drop(Row::DynOrder);
-                }
-                if lane == first_lane {
+                if lane == Lane::Mark(d.staff, MarkKind::Dyn, 1) {
                     marks_out.push(MarkVelocity {
                         bar,
                         mark: mark.mark,
@@ -1007,13 +1012,7 @@ fn mark_lines(
                 );
             }
             DirKind::DynText(text) => {
-                let lane = marks
-                    .lane_for(d.staff, MarkKind::Dyn, t, open)
-                    .ok_or_else(|| stop("four dynamic marks at one time", &number))?;
-                let first_lane = Lane::Mark(d.staff, MarkKind::Dyn, 1);
-                if lane != first_lane && marks.starts_at(first_lane, t) {
-                    cx.rep.drop(Row::DynOrder);
-                }
+                let lane = dyn_lane(&marks, cx.rep, d.staff, t, open, number)?;
                 marks.push(
                     lane,
                     Item {
@@ -1030,7 +1029,7 @@ fn mark_lines(
             } => {
                 let lane = marks
                     .lane_for(d.staff, MarkKind::Hairpin, t, open)
-                    .ok_or_else(|| stop("four hairpins at one time", &number))?;
+                    .ok_or_else(|| stop("four hairpins at one time", number))?;
                 marks.push(
                     lane,
                     Item {
@@ -1059,7 +1058,7 @@ fn mark_lines(
             DirKind::Text { text, dashes } => {
                 let lane = marks
                     .lane_for(d.staff, MarkKind::Text, t, open)
-                    .ok_or_else(|| stop("four texts at one time", &number))?;
+                    .ok_or_else(|| stop("four texts at one time", number))?;
                 let mut text = text.clone();
                 text.ext = dashes.is_some();
                 marks.push(
@@ -1080,19 +1079,20 @@ fn mark_lines(
             }
             DirKind::Tempo { tempo, dashes } => {
                 if marks.busy(Lane::Tempo, t, open) {
-                    return Err(stop("two tempo marks at one time", &number));
+                    return Err(stop("two tempo marks at one time", number));
                 }
                 let mut tempo = tempo.clone();
-                tempo.ext = dashes.is_some() && tempo.text.is_some();
+                let ext = dashes.is_some() && tempo.text.is_some();
+                tempo.ext = ext;
                 marks.push(
                     Lane::Tempo,
                     Item {
                         start: t,
                         end: None,
-                        tok: Tok::Tempo(tempo.clone()),
+                        tok: Tok::Tempo(tempo),
                     },
                 );
-                if let (Some(n), true) = (dashes, tempo.ext) {
+                if let (Some(n), true) = (dashes, ext) {
                     open.push(OpenSpan {
                         lane: Lane::Tempo,
                         number: *n,
@@ -1113,7 +1113,7 @@ fn mark_lines(
             } => {
                 let lane = Lane::Mark(d.staff, MarkKind::Ottava, 1);
                 if marks.busy(lane, t, open) {
-                    return Err(stop("two ottava lines on one staff", &number));
+                    return Err(stop("two ottava lines on one staff", number));
                 }
                 marks.push(
                     lane,
@@ -1139,7 +1139,7 @@ fn mark_lines(
                     ));
                 }
             }
-            DirKind::Trill { start: true } => {
+            DirKind::Trill(Edge::Start) => {
                 let lane = Lane::Mark(d.staff, MarkKind::Trill, 1);
                 marks.push(
                     lane,
@@ -1155,26 +1155,49 @@ fn mark_lines(
                     kind: SpanKind::Trill,
                 });
             }
-            DirKind::Trill { start: false } => {
+            DirKind::Trill(Edge::Stop) => {
                 close(&mut marks, open, SpanKind::Trill, 1, d.staff, t);
             }
             DirKind::Pedal(..) => {}
         }
     }
+    lines_of_marks(marks, layout, number)
+}
+
+fn dyn_lane(
+    marks: &Marks,
+    rep: &mut Report,
+    staff: Staff,
+    t: Frac,
+    open: &[OpenSpan],
+    number: &str,
+) -> Result<Lane, String> {
+    let lane = marks
+        .lane_for(staff, MarkKind::Dyn, t, open)
+        .ok_or_else(|| stop("four dynamic marks at one time", number))?;
+    let first_lane = Lane::Mark(staff, MarkKind::Dyn, 1);
+    if lane != first_lane && marks.starts_at(first_lane, t) {
+        rep.drop(Row::DynOrder);
+    }
+    Ok(lane)
+}
+
+fn lines_of_marks(marks: Marks, layout: &BarLayout, number: &str) -> Result<Vec<Line>, String> {
+    let end = layout.total() - layout.trail;
     let mut lines = Vec::new();
     for (lane, mut items) in marks.lanes {
         items.sort_by_key(|i| i.start);
         let mut els = Vec::new();
-        for k in 0..items.len() {
-            let next = items.get(k + 1).map_or(end, |n| n.start);
-            let it = &items[k];
+        let mut items = items.into_iter().peekable();
+        while let Some(it) = items.next() {
+            let next = items.peek().map_or(end, |n| n.start);
             let stop_at = match it.end {
                 Some(e) => e.min(next),
                 None if it.tok.is_point() || matches!(it.tok, Tok::Dyn(_)) => next,
                 None => end,
             };
             if stop_at > next {
-                return Err(stop("marks of one type that overlap", &number));
+                return Err(stop("marks of one type that overlap", number));
             }
             if stop_at <= it.start {
                 continue;
@@ -1182,7 +1205,7 @@ fn mark_lines(
             els.push(El {
                 start: it.start,
                 dur: stop_at - it.start,
-                kind: ElKind::Tok(it.tok.clone()),
+                kind: ElKind::Tok(it.tok),
             });
         }
         if els.is_empty() {
@@ -1404,7 +1427,7 @@ fn level_at(marks: &[(Frac, f64, Option<DynMark>)], carried: f64, t: Frac) -> f6
     level
 }
 
-pub fn build(src: &Source, keep: Keep, rep: &mut Report) -> Result<Built, String> {
+fn header_of(src: &Source, rep: &mut Report) -> Vec<Attr> {
     let mut header = vec![Attr::Format(1)];
     if src.one_staff {
         header.push(Attr::OneStaff);
@@ -1422,16 +1445,21 @@ pub fn build(src: &Source, keep: Keep, rep: &mut Report) -> Result<Built, String
     if let Some(p) = src.pan.filter(|p| p.abs() > 0.001) {
         header.push(Attr::Pan(p));
     }
+    header
+}
+
+pub fn build(src: &Source, keep: Keep, rep: &mut Report) -> Result<Built, String> {
+    let mut header = header_of(src, rep);
     let mut cx = Ctx {
         rep,
         keep,
         accidentals: src.accidentals_stated,
-        number: String::new(),
+        number: "",
     };
     let mut meter = Meter::four_four();
     let mut key: Option<Key> = None;
     let mut bars: Vec<Bar> = Vec::new();
-    let mut layouts: Vec<Layout> = Vec::new();
+    let mut prev_layout: Option<Layout> = None;
     let mut toks = BTreeMap::new();
     let mut marks_out = Vec::new();
     let mut open: Vec<OpenSpan> = Vec::new();
@@ -1441,13 +1469,18 @@ pub fn build(src: &Source, keep: Keep, rep: &mut Report) -> Result<Built, String
     let mut level = crate::analysis::DEFAULT_VELOCITY;
     let mut numbers = Vec::new();
     let mut rounded = Vec::new();
-    let by_number = src
+    let numbered_by_staff = src
         .measures
         .iter()
         .flat_map(|m| &m.notes)
         .any(|n| n.voice.parse::<u32>().is_ok_and(|v| v > 4));
+    let home_staff = if numbered_by_staff {
+        HomeStaff::ByVoiceNumber
+    } else {
+        HomeStaff::ByNoteCount
+    };
     for (bi, m) in src.measures.iter().enumerate() {
-        cx.number = m.number.clone();
+        cx.number = &m.number;
         numbers.push(m.number.clone());
         rounded.push(m.rounded);
         let mut attrs: Vec<Attr> = Vec::new();
@@ -1483,7 +1516,7 @@ pub fn build(src: &Source, keep: Keep, rep: &mut Report) -> Result<Built, String
                 _ => attrs.push(a.clone()),
             }
         }
-        let lay = layout_of(&meter, &cells, m, bi == 0, layouts.last())?;
+        let lay = layout_of(&meter, &cells, m, prev_layout.as_ref());
         if let Some(n) = lay.cells_attr {
             attrs.push(Attr::Cells(n));
         }
@@ -1493,7 +1526,7 @@ pub fn build(src: &Source, keep: Keep, rep: &mut Report) -> Result<Built, String
         level = next_level;
         let at = |t: Frac| level_at(&lv_marks, carried_level, t);
         let mut lines = Vec::new();
-        let voices = group_voices(m, &m.number, by_number)?;
+        let voices = group_voices(m, &m.number, home_staff)?;
         let mut onsets = Vec::new();
         for (lane, notes) in &voices {
             for n in notes.iter().filter(|n| n.grace.is_none() && !n.chord) {
@@ -1551,7 +1584,7 @@ pub fn build(src: &Source, keep: Keep, rep: &mut Report) -> Result<Built, String
             lines,
             layout,
         });
-        layouts.push(lay);
+        prev_layout = Some(lay);
     }
     if !open.is_empty() {
         cx.rep
@@ -1575,15 +1608,7 @@ pub fn build(src: &Source, keep: Keep, rep: &mut Report) -> Result<Built, String
         header.push(Attr::PedalStyle(style));
     }
     let mut score = Score { header, bars };
-    let labels = crate::check::expected_labels(&score);
-    let mut changed = 0;
-    for ((bar, label), number) in score.bars.iter_mut().zip(labels).zip(&numbers) {
-        if label != *number {
-            changed += 1;
-        }
-        bar.label = label;
-    }
-    cx.rep.drop_n(Row::Labels, changed);
+    cx.rep.drop_n(Row::Labels, relabel(&mut score, &numbers));
     pedal_rule(&mut score);
     Ok(Built {
         score,
@@ -1592,6 +1617,18 @@ pub fn build(src: &Source, keep: Keep, rep: &mut Report) -> Result<Built, String
         numbers,
         rounded,
     })
+}
+
+fn relabel(score: &mut Score, numbers: &[String]) -> usize {
+    let labels = crate::check::expected_labels(score);
+    let mut changed = 0;
+    for ((bar, label), number) in score.bars.iter_mut().zip(labels).zip(numbers) {
+        if label != *number {
+            changed += 1;
+        }
+        bar.label = label;
+    }
+    changed
 }
 
 fn pedal_rule(score: &mut Score) {
@@ -1618,9 +1655,9 @@ fn pedal_rule(score: &mut Score) {
                 .lines
                 .iter()
                 .find(|l| l.lane == Lane::Ped)
-                .map(|l| l.els.clone())
+                .map(|l| l.els.as_slice())
         };
-        let mut counts: Vec<(Vec<El>, usize)> = Vec::new();
+        let mut counts: Vec<(&[El], usize)> = Vec::new();
         for b in &applies {
             let Some(els) = line_of(*b) else { continue };
             let has_pedal = els
@@ -1643,10 +1680,11 @@ fn pedal_rule(score: &mut Score) {
         let Some(first) = applies.first().copied() else {
             continue;
         };
+        let els = rule.to_vec();
         score.bars[first].lines.push(Line {
             lane: Lane::PedRule,
             src: 0,
-            els: rule,
+            els,
         });
     }
 }

@@ -2,17 +2,17 @@ use std::fmt::Write as _;
 
 use crate::frac::Frac;
 use crate::model::{
-    AccDisplay, ArpKind, Articulation, Bar, BarLayout, Clef, Dyn, El, ElKind, Event, GlissLine,
-    Grace, GroupHead, Hairpin, Head, Lane, Metronome, Note, OrnamentKind, Ottava, Pedal, PitchMark,
-    Place, Score, Slurs, Staff, Tempo, TempoMark, TextFrame, Tok, TokMark, TupletLook,
+    AccDisplay, ArpKind, Articulation, Attr, Bar, BarLayout, Clef, Dyn, El, ElKind, Event,
+    GlissLine, Grace, GroupHead, Hairpin, Head, Lane, Metronome, Note, OrnamentKind, Ottava, Pedal,
+    PitchMark, Place, Score, Slurs, Staff, Tempo, TempoMark, TextFrame, Tok, TokMark, TupletLook,
 };
 use crate::text::attr::{escape, fmt_num, fmt_signed};
 
 pub fn write(score: &Score) -> Result<String, String> {
     let mut out = String::new();
-    let mut header = score.header.clone();
+    let mut header: Vec<&Attr> = score.header.iter().collect();
     header.sort_by_key(|a| a.order());
-    for a in &header {
+    for a in header {
         let _ = writeln!(out, "@ {a}");
     }
     let label_w = score.bars.iter().map(|b| b.label.len()).max().unwrap_or(1);
@@ -27,7 +27,7 @@ pub fn write(score: &Score) -> Result<String, String> {
     for (bar, lines) in score.bars.iter().zip(&kept) {
         out.push('\n');
         if !bar.attrs.is_empty() {
-            let mut attrs = bar.attrs.clone();
+            let mut attrs: Vec<&Attr> = bar.attrs.iter().collect();
             attrs.sort_by_key(|a| a.order());
             let list: Vec<String> = attrs.iter().map(ToString::to_string).collect();
             let _ = writeln!(
@@ -570,11 +570,11 @@ fn chord_text(notes: &[Note]) -> String {
 }
 
 fn slurs_text(s: &Slurs) -> String {
-    let one = |c: char, n: &Option<u32>| match n {
+    let one = |c: char, n: Option<u32>| match n {
         Some(n) => format!("{c}{n}"),
         None => c.to_string(),
     };
-    let ends: String = s.ends.iter().map(|n| one(')', n)).collect();
+    let ends: String = s.ends.iter().map(|n| one(')', *n)).collect();
     let starts: String = s
         .starts
         .iter()
@@ -584,7 +584,7 @@ fn slurs_text(s: &Slurs) -> String {
                 Some(Place::Below) => "d",
                 None => "",
             };
-            one('(', &st.number) + dir
+            one('(', st.number) + dir
         })
         .collect();
     ends + &starts

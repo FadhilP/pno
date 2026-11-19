@@ -82,7 +82,7 @@ fn drop_defaults(score: &mut Score) {
             })
             .collect();
         Edits {
-            signs: a.signs.clone(),
+            signs: a.signs,
             multi_voice,
         }
     };
@@ -159,18 +159,18 @@ fn drop_default_pedals(score: &mut Score) {
             rule = None;
         }
         if let Some(i) = bar.lines.iter().position(|l| l.lane == Lane::PedRule) {
-            let els = bar.lines[i].els.clone();
-            let stops = !flatten(&els)
+            let els = &bar.lines[i].els;
+            let stops = !flatten(els)
                 .iter()
                 .any(|(_, _, t)| matches!(t, Tok::Pedal(_) | Tok::Cont));
             let same = match &rule {
-                Some(r) => *r == els,
+                Some(r) => r == els,
                 None => stops,
             };
             if same {
                 bar.lines.remove(i);
             } else {
-                rule = (!stops).then_some(els);
+                rule = (!stops).then(|| els.clone());
             }
         }
         let applies =
@@ -276,7 +276,7 @@ fn split_els(els: &mut Vec<El>, factor: Frac, bounds: Option<&[Frac]>) {
                     t += d;
                 }
             }
-            _ => out.push(e),
+            ElKind::Tok(_) => out.push(e),
         }
     }
     *els = out;

@@ -126,13 +126,15 @@ fn normalize(wav: &Path) -> Result<(), String> {
         let sound = bytes[pcm.start..end]
             .chunks_exact(2)
             .rposition(|c| i16::from_le_bytes([c[0], c[1]]).unsigned_abs() > SILENT.unsigned_abs());
-        let margin = (f64::from(pcm.rate) * MARGIN_SECONDS) as usize * pcm.frame;
+        let margin = (f64::from(pcm.rate) * MARGIN_SECONDS).floor() as usize * pcm.frame;
         let keep = sound.map_or(0, |i| (i * 2 / pcm.frame + 1) * pcm.frame) + margin;
         let keep = keep.min(end - pcm.start);
         bytes.truncate(pcm.start + keep);
-        let riff = (bytes.len() - 8) as u32;
+        let too_large = |_| format!("{} is too large for WAV", wav.display());
+        let riff = u32::try_from(bytes.len() - 8).map_err(too_large)?;
+        let data_len = u32::try_from(keep).map_err(too_large)?;
         bytes[4..8].copy_from_slice(&riff.to_le_bytes());
-        bytes[pcm.start - 4..pcm.start].copy_from_slice(&(keep as u32).to_le_bytes());
+        bytes[pcm.start - 4..pcm.start].copy_from_slice(&data_len.to_le_bytes());
     }
     std::fs::write(wav, bytes).map_err(cannot)
 }

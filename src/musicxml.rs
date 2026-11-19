@@ -11,9 +11,9 @@ use crate::model::{
     Mode, Note, OrnamentKind, Ottava, PedalStyle, PhraseMark, Pitch, PitchMark, Place, Sign, Staff,
     Tempo, TempoMark, TextFrame, TimeSymbol, Tok, TokMark, TupletLook,
 };
+use crate::perform::TICKS_PER_QUARTER;
 
 const MUSICXML_VELOCITY_BASE: f64 = 90.0;
-const TICKS_PER_QUARTER: f64 = 480.0;
 
 fn esc(s: &str) -> String {
     s.replace('&', "&amp;")
@@ -300,16 +300,16 @@ fn measure(ctx: &Ctx, b: usize, state: &mut State, out: &mut String) -> Result<(
     for at in &bar.attrs {
         match at {
             Attr::Break(Break::System) if ctx.frame == Frame::Full && b != 0 => {
-                out.push_str("      <print new-system=\"yes\"/>\n")
+                out.push_str("      <print new-system=\"yes\"/>\n");
             }
             Attr::Break(Break::Page) if ctx.frame == Frame::Full && b != 0 => {
-                out.push_str("      <print new-page=\"yes\"/>\n")
+                out.push_str("      <print new-page=\"yes\"/>\n");
             }
             _ => {}
         }
     }
     left_barline(a, b, out);
-    attributes(ctx, b, state, out)?;
+    attributes(ctx, b, state, out);
     let mut streams: Vec<(Lane, Vec<Item>)> = Vec::new();
     let mut lines: Vec<&crate::model::Line> =
         bar.lines.iter().filter(|l| l.lane.is_voice()).collect();
@@ -340,7 +340,10 @@ fn measure(ctx: &Ctx, b: usize, state: &mut State, out: &mut String) -> Result<(
                 keep.push(d);
                 continue;
             }
-            let after = |n: &Item| n.t > d.0.t || (n.t == d.0.t && n.advance > 0);
+            let after = |n: &Item| {
+                let sounds_at_same_time = n.t == d.0.t && n.advance > 0;
+                n.t > d.0.t || sounds_at_same_time
+            };
             let i = items.iter().position(after).unwrap_or(items.len());
             items.insert(i, d.0);
         }
@@ -545,7 +548,7 @@ fn clef_tokens(a: &Analysis, b: usize, staff: Staff) -> Vec<(Frac, Clef)> {
         .collect()
 }
 
-fn attributes(ctx: &Ctx, b: usize, state: &mut State, out: &mut String) -> Result<(), String> {
+fn attributes(ctx: &Ctx, b: usize, state: &mut State, out: &mut String) {
     let a = ctx.a;
     let bar = &a.score.bars[b];
     let first = !state.first_done;
@@ -610,7 +613,6 @@ fn attributes(ctx: &Ctx, b: usize, state: &mut State, out: &mut String) -> Resul
     if !body.is_empty() {
         let _ = write!(out, "      <attributes>\n{body}      </attributes>\n");
     }
-    Ok(())
 }
 
 fn voice_number(lane: Lane) -> u8 {
@@ -642,7 +644,7 @@ fn note_values(len: Frac) -> Option<Vec<Frac>> {
     rest.is_zero().then_some(out)
 }
 
-fn at_leaf(a: &Analysis, leaf: &Leaf, e: String) -> String {
+fn at_leaf(a: &Analysis, leaf: &Leaf, e: &str) -> String {
     format!("{e} (bar {}, {})", a.score.bars[leaf.bar].label, leaf.lane)
 }
 
@@ -662,7 +664,8 @@ fn grace_type_value(g: &crate::model::GraceNote, count: usize) -> u32 {
 }
 
 fn grace_type(g: &crate::model::GraceNote, count: usize) -> &'static str {
-    let log2 = -(grace_type_value(g, count).trailing_zeros() as i32);
+    let zeros = grace_type_value(g, count).trailing_zeros();
+    let log2 = -i32::try_from(zeros).expect("a u32 has at most 32 trailing zeros");
     type_name(log2).unwrap_or("eighth")
 }
 
@@ -698,58 +701,7 @@ fn leaf_items(ctx: &Ctx, id: usize, leaf: &Leaf, items: &mut Vec<Item>) -> Resul
             });
             return Ok(());
         }
-        Tok::Empty => {
-            // An empty run in a tuplet is hidden rests: one for each note value of its length.
-            let not_a_value = || {
-                at_leaf(
-                    a,
-                    leaf,
-                    format!("internal: {} is not a note value", leaf.written),
-                )
-            };
-            let pieces = note_values(leaf.written).ok_or_else(not_a_value)?;
-            let n = tuplet_notations(a, id);
-            let mut at = t;
-            for (i, piece) in pieces.iter().enumerate() {
-                let share = Frac::int(dur) * *piece / leaf.written;
-                if !share.is_int() {
-                    return Err(not_a_value());
-                }
-                let (ty, dots) = written_type(*piece).map_err(|e| at_leaf(a, leaf, e))?;
-                let mut xml = format!(
-                    "      <note print-object=\"no\">\n        <rest/>\n        <duration>{}</duration>\n",
-                    share.num()
-                );
-                let _ = writeln!(
-                    xml,
-                    "        <voice>{voice}</voice>\n        <type>{ty}</type>"
-                );
-                xml.push_str(&"        <dot/>\n".repeat(usize::from(dots)));
-                xml.push_str(&time_mod(a, leaf));
-                let _ = writeln!(xml, "        <staff>{}</staff>", staff.number());
-                let first = i == 0;
-                let last = i + 1 == pieces.len();
-                let ends: String = n
-                    .lines()
-                    .filter(|l| {
-                        (first && l.contains("\"start\"")) || (last && l.contains("\"stop\""))
-                    })
-                    .map(|l| format!("{l}\n"))
-                    .collect();
-                if !ends.is_empty() {
-                    let _ = write!(xml, "        <notations>\n{ends}        </notations>\n");
-                }
-                xml.push_str("      </note>\n");
-                items.push(Item {
-                    t: at,
-                    order: 1,
-                    xml,
-                    advance: share.num(),
-                });
-                at += share.num();
-            }
-            return Ok(());
-        }
+        Tok::Empty => return hidden_rests(a, id, leaf, t, dur, items),
         _ => return Ok(()),
     };
     let mut xml = String::new();
@@ -768,20 +720,16 @@ fn leaf_items(ctx: &Ctx, id: usize, leaf: &Leaf, items: &mut Vec<Item>) -> Resul
             chord_xml(ctx, leaf, ev, &nc, &mut xml)?;
         }
     }
-    let (type_xml, bar_rest) = if ev.head == Head::BarRest {
-        (String::new(), true)
+    let type_xml = if ev.head == Head::BarRest {
+        String::new()
     } else {
-        let (ty, dots) = written_type(leaf.written).map_err(|e| at_leaf(a, leaf, e))?;
+        let (ty, dots) = written_type(leaf.written).map_err(|e| at_leaf(a, leaf, &e))?;
         let size = size_attr(&ev.marks);
-        (
-            format!(
-                "        <type{size}>{ty}</type>\n{}",
-                "        <dot/>\n".repeat(usize::from(dots))
-            ),
-            false,
+        format!(
+            "        <type{size}>{ty}</type>\n{}",
+            "        <dot/>\n".repeat(usize::from(dots))
         )
     };
-    let _ = bar_rest;
     let nc = NoteCtx {
         leaf: id,
         part: Part::Main,
@@ -812,6 +760,69 @@ fn leaf_items(ctx: &Ctx, id: usize, leaf: &Leaf, items: &mut Vec<Item>) -> Resul
         xml,
         advance: dur,
     });
+    Ok(())
+}
+
+// An empty run in a tuplet is hidden rests: one for each note value of its length.
+fn hidden_rests(
+    a: &Analysis,
+    id: usize,
+    leaf: &Leaf,
+    t: i64,
+    dur: i64,
+    items: &mut Vec<Item>,
+) -> Result<(), String> {
+    let voice = voice_number(leaf.lane);
+    let staff = Analysis::home_staff(leaf.lane);
+    let not_a_value = || {
+        at_leaf(
+            a,
+            leaf,
+            &format!("internal: {} is not a note value", leaf.written),
+        )
+    };
+    let pieces = note_values(leaf.written).ok_or_else(not_a_value)?;
+    let n = tuplet_notations(a, id);
+    let mut at = t;
+    for (i, piece) in pieces.iter().enumerate() {
+        let share = Frac::int(dur) * *piece / leaf.written;
+        if !share.is_int() {
+            return Err(not_a_value());
+        }
+        let (ty, dots) = written_type(*piece).map_err(|e| at_leaf(a, leaf, &e))?;
+        let mut xml = format!(
+            "      <note print-object=\"no\">\n        <rest/>\n        <duration>{}</duration>\n",
+            share.num()
+        );
+        let _ = writeln!(
+            xml,
+            "        <voice>{voice}</voice>\n        <type>{ty}</type>"
+        );
+        xml.push_str(&"        <dot/>\n".repeat(usize::from(dots)));
+        xml.push_str(&time_mod(a, leaf));
+        let _ = writeln!(xml, "        <staff>{}</staff>", staff.number());
+        let first = i == 0;
+        let last = i + 1 == pieces.len();
+        let mut ends = String::new();
+        for l in n.lines() {
+            let starts_here = first && l.contains("\"start\"");
+            let stops_here = last && l.contains("\"stop\"");
+            if starts_here || stops_here {
+                let _ = writeln!(ends, "{l}");
+            }
+        }
+        if !ends.is_empty() {
+            let _ = write!(xml, "        <notations>\n{ends}        </notations>\n");
+        }
+        xml.push_str("      </note>\n");
+        items.push(Item {
+            t: at,
+            order: 1,
+            xml,
+            advance: share.num(),
+        });
+        at += share.num();
+    }
     Ok(())
 }
 
@@ -944,41 +955,10 @@ fn chord_xml(
             part: nc.part,
             note: i,
         };
-        let mut attrs = String::new();
-        if let Some(n) = note {
-            let vel = a.velocity(r);
-            let leaf = &a.leaves[nc.leaf];
-            let reader = a.reader_level_at(Analysis::home_staff(leaf.lane), leaf.bar, leaf.start);
-            if vel.note != reader {
-                let _ = write!(
-                    attrs,
-                    " dynamics=\"{}\"",
-                    num(vel.note / MUSICXML_VELOCITY_BASE * 100.0)
-                );
-            }
-            for m in &n.marks {
-                match m {
-                    PitchMark::Attack(v) => {
-                        let _ = write!(
-                            attrs,
-                            " attack=\"{}\"",
-                            num(v * ctx.div as f64 / TICKS_PER_QUARTER)
-                        );
-                    }
-                    PitchMark::Release(v) => {
-                        let _ = write!(
-                            attrs,
-                            " release=\"{}\"",
-                            num(v * ctx.div as f64 / TICKS_PER_QUARTER)
-                        );
-                    }
-                    _ => {}
-                }
-            }
-        }
-        if note.is_some_and(|n| n.hidden) {
-            attrs.push_str(" print-object=\"no\"");
-        }
+        let attrs = match note {
+            Some(n) => note_attrs(ctx, r, n)?,
+            None => String::new(),
+        };
         let _ = writeln!(out, "      <note{attrs}>");
         if let Some(g) = &nc.grace {
             out.push_str(g);
@@ -1049,7 +1029,12 @@ fn chord_xml(
                     .unwrap_or_default(),
             });
         }
-        let notations = notations(ctx, nc, note, r, i == 0)?;
+        let position = if i == 0 {
+            ChordNote::First
+        } else {
+            ChordNote::Other
+        };
+        let notations = notations(ctx, nc, note, r, position);
         if !notations.is_empty() {
             let _ = write!(
                 out,
@@ -1059,6 +1044,39 @@ fn chord_xml(
         out.push_str("      </note>\n");
     }
     Ok(())
+}
+
+fn note_attrs(ctx: &Ctx, r: NoteRef, n: &Note) -> Result<String, String> {
+    let a = ctx.a;
+    let mut attrs = String::new();
+    let vel = a.velocity(r);
+    let leaf = &a.leaves[r.leaf];
+    let reader = a.reader_level_at(Analysis::home_staff(leaf.lane), leaf.bar, leaf.start);
+    if vel.note != reader {
+        let _ = write!(
+            attrs,
+            " dynamics=\"{}\"",
+            num(vel.note / MUSICXML_VELOCITY_BASE * 100.0)
+        );
+    }
+    for m in &n.marks {
+        let (name, v) = match m {
+            PitchMark::Attack(v) => ("attack", v),
+            PitchMark::Release(v) => ("release", v),
+            _ => continue,
+        };
+        let div = i32::try_from(ctx.div)
+            .map_err(|_| format!("internal: {} divisions do not fit in i32", ctx.div))?;
+        let _ = write!(
+            attrs,
+            " {name}=\"{}\"",
+            num(v * f64::from(div) / TICKS_PER_QUARTER)
+        );
+    }
+    if n.hidden {
+        attrs.push_str(" print-object=\"no\"");
+    }
+    Ok(attrs)
 }
 
 #[derive(Clone, Copy)]
@@ -1179,50 +1197,24 @@ fn tie_chain_end(a: &Analysis, mut r: NoteRef) -> NoteRef {
     r
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ChordNote {
+    First,
+    Other,
+}
+
 fn notations(
     ctx: &Ctx,
     nc: &NoteCtx,
     note: Option<&Note>,
     r: NoteRef,
-    first: bool,
-) -> Result<String, String> {
+    position: ChordNote,
+) -> String {
     let a = ctx.a;
+    let first = position == ChordNote::First;
     let mut s = String::new();
     if let Some(n) = note {
-        if n.tied {
-            s.push_str("          <tied type=\"stop\"/>\n");
-        }
-        if a.tie_starts.contains_key(&r) {
-            let o = if n.has(PitchMark::TieUp) {
-                " orientation=\"over\""
-            } else if n.has(PitchMark::TieDown) {
-                " orientation=\"under\""
-            } else {
-                ""
-            };
-            let _ = writeln!(s, "          <tied type=\"start\"{o}/>");
-        }
-        if n.has(PitchMark::LetRing) {
-            s.push_str("          <tied type=\"let-ring\"/>\n");
-        }
-        for g in a.glissandi.iter().filter(|g| g.end == r) {
-            let (tag, line) = gliss_look(g.line);
-            let _ = writeln!(
-                s,
-                "          <{tag} line-type=\"{line}\" number=\"{}\" type=\"stop\"/>",
-                g.number
-            );
-        }
-        for g in a.glissandi.iter().filter(|g| g.start == r) {
-            let (tag, line) = gliss_look(g.line);
-            let text = matches!(g.line, GlissLine::WavyText | GlissLine::StraightText);
-            let body = if text { "gliss." } else { "" };
-            let _ = writeln!(
-                s,
-                "          <{tag} line-type=\"{line}\" number=\"{}\" type=\"start\">{body}</{tag}>",
-                g.number
-            );
-        }
+        s.push_str(&ties_and_glissandi(a, n, r));
     }
     if first {
         for sl in &a.slurs {
@@ -1237,8 +1229,8 @@ fn notations(
         for sl in &a.slurs {
             if sl.start == r {
                 let place = match sl.above {
-                    Some(true) => " placement=\"above\"",
-                    Some(false) => " placement=\"below\"",
+                    Some(Place::Above) => " placement=\"above\"",
+                    Some(Place::Below) => " placement=\"below\"",
                     None => "",
                 };
                 let _ = writeln!(
@@ -1251,66 +1243,10 @@ fn notations(
         if nc.part == Part::Main {
             s.push_str(&tuplet_notations(a, nc.leaf));
         }
-    }
-    let mut orn = String::new();
-    // Overlapping trill lines of the two staves need two numbers.
-    let wavy = match Analysis::home_staff(a.leaves[nc.leaf].lane) {
-        Staff::Upper => 1,
-        Staff::Lower => 2,
-    };
-    if first {
-        for m in nc.marks {
-            match m {
-                TokMark::Ornament { kind, above, below } => {
-                    let _ = writeln!(orn, "            {}", ornament_xml(*kind));
-                    if *kind == OrnamentKind::TrillLine {
-                        let _ = writeln!(
-                            orn,
-                            "            <wavy-line type=\"start\" number=\"{wavy}\"/>"
-                        );
-                    }
-                    if let Some(x) = above {
-                        let _ = writeln!(
-                            orn,
-                            "            <accidental-mark placement=\"above\">{}</accidental-mark>",
-                            acc_name(*x)
-                        );
-                    }
-                    if let Some(x) = below {
-                        let _ = writeln!(
-                            orn,
-                            "            <accidental-mark placement=\"below\">{}</accidental-mark>",
-                            acc_name(*x)
-                        );
-                    }
-                }
-                TokMark::Tremolo(n) => {
-                    let _ = writeln!(orn, "            <tremolo type=\"single\">{n}</tremolo>");
-                }
-                _ => {}
-            }
+        let orn = ornaments(a, nc, r);
+        if !orn.is_empty() {
+            let _ = write!(s, "          <ornaments>\n{orn}          </ornaments>\n");
         }
-        if nc.part == Part::Main {
-            if let Some(t) = tremolo_ornament(a, nc.leaf) {
-                orn.push_str(&t);
-            }
-        }
-        if a.trill_notes.iter().any(|(start, _)| *start == r) {
-            let _ = writeln!(
-                orn,
-                "            <wavy-line type=\"start\" number=\"{wavy}\"/>"
-            );
-        }
-        let lane_line_ends = a.trill_notes.iter().any(|(_, end)| *end == r);
-        if wavy_line_ends_here(a, r) || lane_line_ends {
-            let _ = writeln!(
-                orn,
-                "            <wavy-line type=\"stop\" number=\"{wavy}\"/>"
-            );
-        }
-    }
-    if !orn.is_empty() {
-        let _ = write!(s, "          <ornaments>\n{orn}          </ornaments>\n");
     }
     if let Some(n) = note {
         let fingers: Vec<u8> = n
@@ -1333,34 +1269,7 @@ fn notations(
         }
     }
     if first {
-        let mut arts: Vec<&str> = nc
-            .marks
-            .iter()
-            .filter_map(|m| match m {
-                TokMark::Art(x) => Some(match x {
-                    Articulation::Staccato => "<staccato/>",
-                    Articulation::Staccatissimo => "<staccatissimo/>",
-                    Articulation::Tenuto => "<tenuto/>",
-                    Articulation::Accent => "<accent/>",
-                    Articulation::Marcato => "<strong-accent/>",
-                    Articulation::MarcatoDown => "<strong-accent type=\"down\"/>",
-                }),
-                _ => None,
-            })
-            .collect();
-        let pause = a.pauses.get(&nc.leaf).filter(|_| r.part == Part::Main);
-        match pause {
-            Some(PhraseMark::Breath) => arts.push("<breath-mark/>"),
-            Some(PhraseMark::Caesura) => arts.push("<caesura/>"),
-            _ => {}
-        }
-        if !arts.is_empty() {
-            s.push_str("          <articulations>\n");
-            for x in arts {
-                let _ = writeln!(s, "            {x}");
-            }
-            s.push_str("          </articulations>\n");
-        }
+        s.push_str(&articulations(a, nc, r));
         for m in nc.marks {
             if let TokMark::Fermata { inverted } = m {
                 let ty = if *inverted { "inverted" } else { "upright" };
@@ -1379,7 +1288,138 @@ fn notations(
             let _ = writeln!(s, "          <arpeggiate{attrs}/>");
         }
     }
-    Ok(s)
+    s
+}
+
+fn ties_and_glissandi(a: &Analysis, note: &Note, r: NoteRef) -> String {
+    let mut s = String::new();
+    if note.tied {
+        s.push_str("          <tied type=\"stop\"/>\n");
+    }
+    if a.tie_starts.contains_key(&r) {
+        let o = if note.has(PitchMark::TieUp) {
+            " orientation=\"over\""
+        } else if note.has(PitchMark::TieDown) {
+            " orientation=\"under\""
+        } else {
+            ""
+        };
+        let _ = writeln!(s, "          <tied type=\"start\"{o}/>");
+    }
+    if note.has(PitchMark::LetRing) {
+        s.push_str("          <tied type=\"let-ring\"/>\n");
+    }
+    for g in a.glissandi.iter().filter(|g| g.end == r) {
+        let (tag, line) = gliss_look(g.line);
+        let _ = writeln!(
+            s,
+            "          <{tag} line-type=\"{line}\" number=\"{}\" type=\"stop\"/>",
+            g.number
+        );
+    }
+    for g in a.glissandi.iter().filter(|g| g.start == r) {
+        let (tag, line) = gliss_look(g.line);
+        let text = matches!(g.line, GlissLine::WavyText | GlissLine::StraightText);
+        let body = if text { "gliss." } else { "" };
+        let _ = writeln!(
+            s,
+            "          <{tag} line-type=\"{line}\" number=\"{}\" type=\"start\">{body}</{tag}>",
+            g.number
+        );
+    }
+    s
+}
+
+fn ornaments(a: &Analysis, nc: &NoteCtx, r: NoteRef) -> String {
+    let mut orn = String::new();
+    // Overlapping trill lines of the two staves need two numbers.
+    let wavy = match Analysis::home_staff(a.leaves[nc.leaf].lane) {
+        Staff::Upper => 1,
+        Staff::Lower => 2,
+    };
+    for m in nc.marks {
+        match m {
+            TokMark::Ornament { kind, above, below } => {
+                let _ = writeln!(orn, "            {}", ornament_xml(*kind));
+                if *kind == OrnamentKind::TrillLine {
+                    let _ = writeln!(
+                        orn,
+                        "            <wavy-line type=\"start\" number=\"{wavy}\"/>"
+                    );
+                }
+                if let Some(x) = above {
+                    let _ = writeln!(
+                        orn,
+                        "            <accidental-mark placement=\"above\">{}</accidental-mark>",
+                        acc_name(*x)
+                    );
+                }
+                if let Some(x) = below {
+                    let _ = writeln!(
+                        orn,
+                        "            <accidental-mark placement=\"below\">{}</accidental-mark>",
+                        acc_name(*x)
+                    );
+                }
+            }
+            TokMark::Tremolo(n) => {
+                let _ = writeln!(orn, "            <tremolo type=\"single\">{n}</tremolo>");
+            }
+            _ => {}
+        }
+    }
+    if nc.part == Part::Main {
+        if let Some(t) = tremolo_ornament(a, nc.leaf) {
+            orn.push_str(&t);
+        }
+    }
+    if a.trill_notes.iter().any(|(start, _)| *start == r) {
+        let _ = writeln!(
+            orn,
+            "            <wavy-line type=\"start\" number=\"{wavy}\"/>"
+        );
+    }
+    let lane_line_ends = a.trill_notes.iter().any(|(_, end)| *end == r);
+    if wavy_line_ends_here(a, r) || lane_line_ends {
+        let _ = writeln!(
+            orn,
+            "            <wavy-line type=\"stop\" number=\"{wavy}\"/>"
+        );
+    }
+    orn
+}
+
+fn articulations(a: &Analysis, nc: &NoteCtx, r: NoteRef) -> String {
+    let mut arts: Vec<&str> = nc
+        .marks
+        .iter()
+        .filter_map(|m| match m {
+            TokMark::Art(x) => Some(match x {
+                Articulation::Staccato => "<staccato/>",
+                Articulation::Staccatissimo => "<staccatissimo/>",
+                Articulation::Tenuto => "<tenuto/>",
+                Articulation::Accent => "<accent/>",
+                Articulation::Marcato => "<strong-accent/>",
+                Articulation::MarcatoDown => "<strong-accent type=\"down\"/>",
+            }),
+            _ => None,
+        })
+        .collect();
+    let pause = a.pauses.get(&nc.leaf).filter(|_| r.part == Part::Main);
+    match pause {
+        Some(PhraseMark::Breath) => arts.push("<breath-mark/>"),
+        Some(PhraseMark::Caesura) => arts.push("<caesura/>"),
+        _ => {}
+    }
+    if arts.is_empty() {
+        return String::new();
+    }
+    let mut s = String::from("          <articulations>\n");
+    for x in arts {
+        let _ = writeln!(s, "            {x}");
+    }
+    s.push_str("          </articulations>\n");
+    s
 }
 
 fn wavy_line_ends_here(a: &Analysis, r: NoteRef) -> bool {
@@ -1488,7 +1528,10 @@ fn span_number(a: &Analysis, span: &Span) -> usize {
     let mut open: Vec<(Frac, Lane, usize)> = Vec::new();
     for s in same {
         let start = a.abs(s.start.0, s.start.1);
-        open.retain(|(end, lane, _)| *end > start || (*end == start && *lane != s.lane));
+        open.retain(|(end, lane, _)| {
+            let ends_here_in_other_lane = *end == start && *lane != s.lane;
+            *end > start || ends_here_in_other_lane
+        });
         let n = (1..)
             .find(|n| open.iter().all(|(_, _, m)| m != n))
             .unwrap_or(1);
@@ -1511,22 +1554,28 @@ fn directions(ctx: &Ctx, b: usize) -> Result<Vec<Direction>, String> {
     // of ending spans go before the starts of new ones.
     let mut starts: Vec<(Direction, bool)> = Vec::new();
     for span in &a.spans {
-        let starts_here = span.start.0 == b;
         let carried_in = b == first_bar && span.start.0 < b && span.end.0 >= b;
-        let ends_here = span.end.0 == b || (b == last_bar && span.end.0 > b && span.start.0 <= b);
-        if !(starts_here || carried_in || ends_here) {
+        let entry = if span.start.0 == b {
+            Some(SpanEntry::Starts)
+        } else if carried_in {
+            Some(SpanEntry::CarriedIn)
+        } else {
+            None
+        };
+        let runs_past_excerpt = b == last_bar && span.end.0 > b && span.start.0 <= b;
+        let ends_here = span.end.0 == b || runs_past_excerpt;
+        if entry.is_none() && !ends_here {
             continue;
         }
         let staff = span.lane.staff().unwrap_or(Staff::Upper);
-        let start_t = if carried_in {
-            bar.layout.lead
-        } else {
-            span.start.1
+        let start_t = match entry {
+            Some(SpanEntry::CarriedIn) => bar.layout.lead,
+            _ => span.start.1,
         };
         let end_t = if span.end.0 == b { span.end.1 } else { bar_end };
         let n = span_number(a, span);
-        if starts_here || carried_in {
-            if let Some(d) = span_start(ctx, b, span, staff, ctx.pos(b, start_t)?, n, carried_in) {
+        if let Some(entry) = entry {
+            if let Some(d) = span_start(ctx, b, span, staff, ctx.pos(b, start_t)?, n, entry) {
                 let later_dyn_lane = matches!(span.lane, Lane::Mark(_, MarkKind::Dyn, n) if n > 1);
                 starts.push(((d, staff), later_dyn_lane));
             }
@@ -1637,7 +1686,7 @@ fn pedal_directions(ctx: &Ctx, b: usize) -> Result<Vec<Direction>, String> {
             None,
             Layer::Staff,
         );
-        d.order = if p.action == PedalAction::Stop { 0 } else { 1 };
+        d.order = u8::from(p.action != PedalAction::Stop);
         out.push((d, staff));
     }
     if b == last_bar && b + 1 < a.score.bars.len() && pedal_held_before(a, b + 1) {
@@ -1664,7 +1713,13 @@ fn pedal_held_before(a: &Analysis, b: usize) -> bool {
     held
 }
 
-fn metronome_xml(m: &crate::model::Metronome, parens: bool, visible: bool) -> String {
+#[derive(Clone, Copy)]
+enum MetronomeLook {
+    Shown { parens: bool },
+    Hidden,
+}
+
+fn metronome_xml(m: &crate::model::Metronome, look: MetronomeLook) -> String {
     let unit = match m.unit {
         'w' => "whole",
         'h' => "half",
@@ -1673,12 +1728,21 @@ fn metronome_xml(m: &crate::model::Metronome, parens: bool, visible: bool) -> St
         _ => "quarter",
     };
     let dot = if m.dotted { "<beat-unit-dot/>" } else { "" };
-    let print = if visible { "" } else { " print-object=\"no\"" };
-    let p = if parens { "yes" } else { "no" };
+    let (p, print) = match look {
+        MetronomeLook::Shown { parens: true } => ("yes", ""),
+        MetronomeLook::Shown { parens: false } => ("no", ""),
+        MetronomeLook::Hidden => ("no", " print-object=\"no\""),
+    };
     format!(
         "<metronome parentheses=\"{p}\"{print}><beat-unit>{unit}</beat-unit>{dot}<per-minute>{}</per-minute></metronome>",
         num(m.bpm)
     )
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SpanEntry {
+    Starts,
+    CarriedIn,
 }
 
 fn span_start(
@@ -1688,12 +1752,13 @@ fn span_start(
     staff: Staff,
     t: i64,
     n: usize,
-    carried: bool,
+    entry: SpanEntry,
 ) -> Option<Item> {
     let a = ctx.a;
+    let starts = entry == SpanEntry::Starts;
     match span.tok {
-        Tok::Dyn(d) if !carried => Some(dyn_direction(a, b, span, d, staff, t)),
-        Tok::DynText(d) if !carried => {
+        Tok::Dyn(d) if starts => Some(dyn_direction(a, b, span, d, staff, t)),
+        Tok::DynText(d) if starts => {
             let types = [format!(
                 "<dynamics><other-dynamics>{}</other-dynamics></dynamics>",
                 esc(&d.text)
@@ -1726,7 +1791,7 @@ fn span_start(
         }
         Tok::Text(text) => {
             let mut types = Vec::new();
-            if !carried {
+            if starts {
                 let body = esc(&text.text);
                 types.push(match text.frame {
                     TextFrame::None => format!("<words>{body}</words>"),
@@ -1748,7 +1813,7 @@ fn span_start(
                 )
             })
         }
-        Tok::Tempo(tempo) => tempo_direction(tempo, t, n, carried),
+        Tok::Tempo(tempo) => tempo_direction(tempo, t, n, entry),
         Tok::Ottava(o) => {
             let (ty, size) = match o {
                 Ottava::Up8 => ("down", 8),
@@ -1804,23 +1869,26 @@ fn dyn_direction(a: &Analysis, b: usize, span: &Span, d: &Dyn, staff: Staff, t: 
     )
 }
 
-fn tempo_direction(tempo: &Tempo, t: i64, n: usize, carried: bool) -> Option<Item> {
+fn tempo_direction(tempo: &Tempo, t: i64, n: usize, entry: SpanEntry) -> Option<Item> {
     let mut types = Vec::new();
     let mut sound = None;
-    if !carried {
+    if entry == SpanEntry::Starts {
         if let Some(text) = &tempo.text {
             types.push(format!("<words>{}</words>", esc(text)));
         }
         match &tempo.mark {
             Some(TempoMark::Shown { metronome, parens }) => {
-                types.push(metronome_xml(metronome, *parens, true));
+                types.push(metronome_xml(
+                    metronome,
+                    MetronomeLook::Shown { parens: *parens },
+                ));
                 sound = Some(format!(
                     "tempo=\"{}\"",
                     num(metronome.quarters_per_minute())
                 ));
             }
             Some(TempoMark::Hidden(metronome)) => {
-                types.push(metronome_xml(metronome, false, false));
+                types.push(metronome_xml(metronome, MetronomeLook::Hidden));
                 sound = Some(format!(
                     "tempo=\"{}\"",
                     num(metronome.quarters_per_minute())
@@ -1833,7 +1901,7 @@ fn tempo_direction(tempo: &Tempo, t: i64, n: usize, carried: bool) -> Option<Ite
                         dotted: false,
                         bpm: *bpm,
                     };
-                    types.push(metronome_xml(&m, false, false));
+                    types.push(metronome_xml(&m, MetronomeLook::Hidden));
                 }
                 sound = Some(format!("tempo=\"{bpm}\""));
             }
@@ -1846,16 +1914,14 @@ fn tempo_direction(tempo: &Tempo, t: i64, n: usize, carried: bool) -> Option<Ite
     if types.is_empty() {
         return None;
     }
-    let mut d = direction(
+    Some(direction(
         t,
         Staff::Upper,
         placement(tempo.place, Place::Above),
         &types,
         sound,
         Layer::System,
-    );
-    d.order = 0;
-    Some(d)
+    ))
 }
 
 fn span_stop(span: &Span, staff: Staff, t: i64, n: usize) -> Option<Item> {

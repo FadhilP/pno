@@ -1,5 +1,6 @@
 mod common;
 
+use std::fmt::Write as _;
 use std::path::Path;
 use std::process::Command;
 
@@ -221,6 +222,19 @@ fn humanize_is_bounded_and_the_seed_repeats_it() {
     // At 120 quarters per minute, 1 ms is about 1 tick; the limit is 36 ms.
     assert!(moved.iter().all(|d| d.abs() <= 40), "{moved:?}");
     assert!(moved.iter().any(|d| *d != 0));
+}
+
+#[test]
+fn midi_export_stops_on_a_time_signature_it_cannot_hold() {
+    let dir = temp_dir("midi-beats");
+    let score = write(
+        &dir,
+        "b.pno",
+        "@ format=1\n@ time=257/4\n\n1 rh | R |\n1 lh | R |\n",
+    );
+    let run = pno(&["export", path(&score), path(&dir.join("b.mid"))]);
+    assert_eq!(run.code, 1, "{}", run.stdout);
+    assert!(run.stderr.contains("257 beats"), "{}", run.stderr);
 }
 
 #[test]
@@ -556,7 +570,7 @@ fn tempo_words_are_whole_words_and_changes_end_by_rule() {
             "@ format=1\n\n1 tempo | {first} | _ | _ | _ |\n1 rh | C5 | - | - | - |\n1 lh | R |\n"
         );
         for b in 2..=6 {
-            t.push_str(&format!("\n{b} rh | C5 | - | - | - |\n{b} lh | R |\n"));
+            let _ = write!(t, "\n{b} rh | C5 | - | - | - |\n{b} lh | R |\n");
         }
         t
     };
@@ -692,7 +706,7 @@ fn ornaments_and_repeats_play_as_written() {
         "the sign is for the upper note only"
     );
     let mut starts: Vec<(u32, u8)> = m.notes.iter().map(|n| (n.on, n.key)).collect();
-    starts.sort();
+    starts.sort_unstable();
     let bars: Vec<u8> = starts
         .iter()
         .filter(|n| n.0 % 1920 == 0)
@@ -866,7 +880,7 @@ fn the_voices_of_one_staff_roll_as_one_arpeggio() {
 ";
     let m = export(&dir, &write(&dir, "a.pno", text), "a.mid", &[]);
     let mut roll: Vec<(u32, u8)> = m.notes.iter().map(|n| (n.on, n.key)).collect();
-    roll.sort();
+    roll.sort_unstable();
     let keys: Vec<u8> = roll.iter().map(|n| n.1).collect();
     assert_eq!(keys, vec![60, 67, 76, 84], "one roll from the bottom");
     assert!(roll.windows(2).all(|w| w[1].0 > w[0].0), "{roll:?}");
@@ -887,7 +901,7 @@ fn pno_phrase_skips_the_pickup_and_starts_a_phrase_at_its_upbeat() {
         "C6 | - | - | -",
     ];
     for (b, cells) in bars.iter().enumerate() {
-        text.push_str(&format!("\n{} rh | {cells} |\n{} lh | R |\n", b + 1, b + 1));
+        let _ = write!(text, "\n{} rh | {cells} |\n{} lh | R |\n", b + 1, b + 1);
     }
     let score = write(&dir, "u.pno", &text);
     assert_eq!(pno(&["fmt", path(&score)]).code, 0);

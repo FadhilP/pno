@@ -34,7 +34,7 @@ const FASTEST_QPM: f64 = 2000.0;
 
 // A format 1 standard MIDI file: a tempo track, then one track for each staff.
 // Both staves use channel 1, so the pedal holds the notes of both.
-pub fn write(p: &Performance) -> Vec<u8> {
+pub fn write(p: &Performance) -> Result<Vec<u8>, String> {
     let mut conductor: Vec<Msg> = Vec::new();
     for (t, qpm) in &p.tempo {
         let us = (60_000_000.0 / qpm.clamp(SLOWEST_QPM, FASTEST_QPM)).round() as u32;
@@ -42,15 +42,16 @@ pub fn write(p: &Performance) -> Vec<u8> {
         conductor.push(msg(*t, Rank::Meta, vec![0xFF, 0x51, 3, b[1], b[2], b[3]]));
     }
     for (t, num, den) in &p.meters {
-        let log = den.trailing_zeros() as u8;
-        conductor.push(msg(
-            *t,
-            Rank::Meta,
-            vec![0xFF, 0x58, 4, *num as u8, log, 24, 8],
-        ));
+        let beats = u8::try_from(*num).map_err(|_| {
+            format!("MIDI cannot hold a time signature of {num} beats; the most is 255")
+        })?;
+        let log =
+            u8::try_from(den.trailing_zeros()).expect("trailing_zeros of a u32 is at most 32");
+        conductor.push(msg(*t, Rank::Meta, vec![0xFF, 0x58, 4, beats, log, 24, 8]));
     }
     let name = |n: &str| {
-        let mut b = vec![0xFF, 0x03, n.len() as u8];
+        let len = u8::try_from(n.len()).expect("track names are rh and lh");
+        let mut b = vec![0xFF, 0x03, len];
         b.extend_from_slice(n.as_bytes());
         msg(0.0, Rank::Meta, b)
     };
@@ -89,7 +90,7 @@ pub fn write(p: &Performance) -> Vec<u8> {
     for track in [conductor, upper, lower] {
         write_track(&mut out, track, tick(p.end));
     }
-    out
+    Ok(out)
 }
 
 fn write_track(out: &mut Vec<u8>, mut msgs: Vec<Msg>, end: u32) {
@@ -104,7 +105,8 @@ fn write_track(out: &mut Vec<u8>, mut msgs: Vec<Msg>, end: u32) {
     push_varlen(&mut body, end.saturating_sub(last));
     body.extend_from_slice(&[0xFF, 0x2F, 0]);
     out.extend_from_slice(b"MTrk");
-    out.extend_from_slice(&(body.len() as u32).to_be_bytes());
+    let len = u32::try_from(body.len()).expect("a MIDI track is shorter than 4 GiB");
+    out.extend_from_slice(&len.to_be_bytes());
     out.extend_from_slice(&body);
 }
 

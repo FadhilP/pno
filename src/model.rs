@@ -173,9 +173,8 @@ impl Tok {
     // A point token marks a moment; its slot length has no meaning.
     pub fn is_point(&self) -> bool {
         match self {
-            Tok::Clef(_) | Tok::Phrase(_) => true,
+            Tok::Clef(_) | Tok::Phrase(_) | Tok::DynText(_) => true,
             Tok::Dyn(d) => !d.mark.is_momentary(),
-            Tok::DynText(_) => true,
             Tok::Text(t) => !t.ext,
             Tok::Tempo(t) => !t.ext,
             _ => false,
@@ -354,6 +353,8 @@ pub const STEPS: [char; 7] = ['C', 'D', 'E', 'F', 'G', 'A', 'B'];
 const STEP_SEMITONES: [i32; 7] = [0, 2, 4, 5, 7, 9, 11];
 
 impl Pitch {
+    pub const OCTAVES: std::ops::RangeInclusive<i8> = 0..=9;
+
     pub fn midi(self) -> i32 {
         (i32::from(self.octave) + 1) * 12
             + STEP_SEMITONES[usize::from(self.step)]
@@ -587,7 +588,7 @@ impl DynMark {
         DYN_MARKS
             .iter()
             .position(|m| *m == s)
-            .map(|i| DynMark(i as u8))
+            .map(|i| DynMark(u8::try_from(i).expect("DYN_MARKS has fewer than 256 marks")))
     }
 
     pub fn name(self) -> &'static str {
@@ -784,8 +785,8 @@ impl Meter {
         }
         let pattern = self
             .pattern
-            .clone()
-            .or_else(|| (self.beats.len() > 1).then(|| self.beats.clone()));
+            .as_deref()
+            .or_else(|| (self.beats.len() > 1).then_some(self.beats.as_slice()));
         if let Some(p) = pattern {
             if p.iter().any(|g| !matches!(g, 2 | 3)) || p.iter().sum::<u32>() != num {
                 return Err(

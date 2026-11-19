@@ -12,7 +12,7 @@ fn changes(bar: &Bar) -> Vec<String> {
         .attrs
         .iter()
         .filter(|a| !matches!(a, Attr::Break(_)))
-        .map(|a| a.to_string());
+        .map(ToString::to_string);
     let lines = bar
         .lines
         .iter()
@@ -113,21 +113,22 @@ fn interval(semitones: i32, fifths: i32) -> (Interval, i32) {
 
 fn shift_pitch(p: Pitch, iv: &Interval) -> Result<Pitch, String> {
     let degree = i32::from(p.octave) * 7 + i32::from(p.step) + iv.steps;
-    let octave = degree.div_euclid(7);
-    let step = degree.rem_euclid(7);
+    let unspellable = || format!("{p} cannot be spelled after the transposition");
+    let octave = i8::try_from(degree.div_euclid(7))
+        .ok()
+        .filter(|o| Pitch::OCTAVES.contains(o))
+        .ok_or_else(|| format!("{p} is out of range after the transposition"))?;
+    let step = u8::try_from(degree.rem_euclid(7)).expect("rem_euclid(7) is in 0..7");
     let natural = Pitch {
-        step: step as u8,
+        step,
         alter: 0,
-        octave: octave as i8,
+        octave,
     };
-    let alter = p.midi() + iv.semitones - natural.midi();
-    if alter.abs() > 2 {
-        return Err(format!("{p} cannot be spelled after the transposition"));
-    }
-    Ok(Pitch {
-        alter: alter as i8,
-        ..natural
-    })
+    let alter = i8::try_from(p.midi() + iv.semitones - natural.midi())
+        .ok()
+        .filter(|a| (-2..=2).contains(a))
+        .ok_or_else(unspellable)?;
+    Ok(Pitch { alter, ..natural })
 }
 
 fn shift_notes(notes: &mut [Note], iv: &Interval) -> Result<usize, String> {
@@ -158,7 +159,7 @@ fn shift_key(k: &mut Key, shift: i32) -> Result<(), String> {
             fifths.abs()
         ));
     }
-    k.fifths = fifths as i8;
+    k.fifths = i8::try_from(fifths).expect("checked to be within -7..=7");
     Ok(())
 }
 
@@ -204,7 +205,7 @@ pub fn add_phrases(score: &mut Score) -> Result<Vec<DetectedPhrase>, String> {
 pub fn transpose(
     score: &mut Score,
     semitones: i32,
-    range: Option<RangeInclusive<usize>>,
+    range: Option<&RangeInclusive<usize>>,
 ) -> Result<usize, String> {
     let fifths = score
         .header
@@ -233,7 +234,7 @@ pub fn transpose(
     let mut count = 0;
     let mut failure = None;
     crate::fmt::for_each_leaf_mut(score, |_, bar, _, tok| {
-        let in_range = range.as_ref().is_none_or(|r| r.contains(&bar));
+        let in_range = range.is_none_or(|r| r.contains(&bar));
         let Tok::Event(ev) = tok else {
             return;
         };
@@ -270,23 +271,20 @@ pub fn set_lines(src: &str, labels: &[&str], new: &[String]) -> Result<String, S
             return Err(format!("there is no bar {bar}"));
         }
         let same = |l: &String| line_key(l) == Some((bar, lane));
-        match lines.iter().position(same) {
-            Some(at) => {
-                lines[at] = line.clone();
-                lines = lines
-                    .into_iter()
-                    .enumerate()
-                    .filter(|(i, l)| *i <= at || !same(l))
-                    .map(|(_, l)| l)
-                    .collect();
-            }
-            None => {
-                let last = lines
-                    .iter()
-                    .rposition(|l| line_key(l).is_some_and(|(b, _)| b == bar))
-                    .ok_or_else(|| format!("bar {bar} has no lines"))?;
-                lines.insert(last + 1, line.clone());
-            }
+        if let Some(at) = lines.iter().position(same) {
+            lines[at].clone_from(line);
+            lines = lines
+                .into_iter()
+                .enumerate()
+                .filter(|(i, l)| *i <= at || !same(l))
+                .map(|(_, l)| l)
+                .collect();
+        } else {
+            let last = lines
+                .iter()
+                .rposition(|l| line_key(l).is_some_and(|(b, _)| b == bar))
+                .ok_or_else(|| format!("bar {bar} has no lines"))?;
+            lines.insert(last + 1, line.clone());
         }
     }
     Ok(lines.join(

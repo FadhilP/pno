@@ -4,8 +4,8 @@ use crate::diag::Diag;
 use crate::frac::{Frac, NoteValue};
 use crate::model::{
     Attr, El, ElKind, Event, GlissLine, GroupHead, Head, Key, Lane, MarkKind, Note, OrnamentKind,
-    Ottava, Pedal, PedalStyle, PhraseMark, Pitch, PitchMark, Place, Score, Staff, Tok, TokMark,
-    TupletLook,
+    Ottava, Pedal, PedalStyle, PhraseMark, Pitch, PitchMark, Place, Score, SlurStart, Slurs, Staff,
+    Tok, TokMark, TupletLook,
 };
 use crate::text::write::default_ratio;
 
@@ -93,7 +93,7 @@ pub struct SlurPair {
     pub start: NoteRef,
     pub end: NoteRef,
     pub number: u32,
-    pub above: Option<bool>,
+    pub above: Option<Place>,
 }
 
 pub struct GlissPair {
@@ -101,6 +101,15 @@ pub struct GlissPair {
     pub end: NoteRef,
     pub line: GlissLine,
     pub number: u32,
+}
+
+struct SlurMark<'a> {
+    t: Frac,
+    order: usize,
+    at: NoteRef,
+    starts: &'a [SlurStart],
+    ends: &'a [Option<u32>],
+    above: Option<Place>,
 }
 
 pub struct Analysis<'a> {
@@ -128,7 +137,7 @@ pub fn prev_bar(score: &Score, b: usize) -> Option<usize> {
     let p = b.checked_sub(1)?;
     let volta = |i: usize| {
         score.bars[i].attrs.iter().find_map(|a| match a {
-            Attr::Volta { numbers, .. } => Some(numbers.clone()),
+            Attr::Volta { numbers, .. } => Some(numbers),
             _ => None,
         })
     };
@@ -139,26 +148,18 @@ pub fn prev_bar(score: &Score, b: usize) -> Option<usize> {
         return Some(p);
     }
     let mut first = p;
-    while first > 0 && volta(first - 1) == Some(theirs.clone()) {
+    while first > 0 && volta(first - 1) == Some(theirs) {
         first -= 1;
     }
     first.checked_sub(1)
 }
 
-fn slur_above(marks: &[crate::model::TokMark]) -> Option<bool> {
+fn slur_above(marks: &[TokMark]) -> Option<Place> {
     marks.iter().find_map(|m| match m {
-        crate::model::TokMark::SlurUp => Some(true),
-        crate::model::TokMark::SlurDown => Some(false),
+        TokMark::SlurUp => Some(Place::Above),
+        TokMark::SlurDown => Some(Place::Below),
         _ => None,
     })
-}
-
-pub fn at(score: &Score, bar: usize, lane: Lane, cell: Option<usize>) -> String {
-    let label = &score.bars[bar].label;
-    match cell {
-        Some(c) => format!("{label} {lane} cell {}", c + 1),
-        None => format!("{label} {lane}"),
-    }
 }
 
 impl<'a> Analysis<'a> {
@@ -240,8 +241,9 @@ impl<'a> Analysis<'a> {
         l.total() - l.trail
     }
 
-    pub fn cell(&self, bar: usize, t: Frac) -> Option<usize> {
-        Some(self.score.bars[bar].layout.cell_at(t))
+    pub fn location(&self, bar: usize, lane: Lane, t: Frac) -> String {
+        let b = &self.score.bars[bar];
+        format!("{} {lane} cell {}", b.label, b.layout.cell_at(t) + 1)
     }
 
     fn error(&mut self, src: usize, at: String, msg: impl Into<String>) {
@@ -363,7 +365,7 @@ impl<'a> Analysis<'a> {
         e: &El,
         head: GroupHead,
     ) -> Option<(u32, u32)> {
-        let loc = at(self.score, bar, lane, self.cell(bar, e.start));
+        let loc = self.location(bar, lane, e.start);
         match head {
             GroupHead::Tremolo { .. } => Some((2, 1)),
             GroupHead::Tuplet { num, ratio, .. } => {
@@ -401,7 +403,7 @@ impl<'a> Analysis<'a> {
         let halves =
             notes.len() == 2 && children.len() == 2 && notes.iter().all(|n| n.dur * 2 == e.dur);
         if !halves {
-            let loc = at(self.score, bar, lane, self.cell(bar, e.start));
+            let loc = self.location(bar, lane, e.start);
             self.error(
                 src,
                 loc,
@@ -418,12 +420,7 @@ impl<'a> Analysis<'a> {
                 continue;
             }
             if NoteValue::of(leaf.written).is_none() {
-                let loc = at(
-                    self.score,
-                    leaf.bar,
-                    leaf.lane,
-                    self.cell(leaf.bar, leaf.start),
-                );
+                let loc = self.location(leaf.bar, leaf.lane, leaf.start);
                 errs.push(Diag::error(
                     leaf.src,
                     loc,
@@ -500,18 +497,13 @@ impl<'a> Analysis<'a> {
                 let next = ids
                     .get(k + 1)
                     .and_then(|&n| self.leaves[n].event().map(|e| (n, e)));
-                let fits = |o: &Vec<usize>| starts.len() == 1 || o.len() == starts.len();
+                let fits = |o: &[usize]| starts.len() == 1 || o.len() == starts.len();
                 let ends = next
                     .map(|(n, e)| (n, e, by_pitch(e.notes())))
                     .filter(|(_, _, o)| !o.is_empty() && fits(o));
                 let Some((end_leaf, end_ev, ends)) = ends else {
                     let leaf = &self.leaves[id];
-                    let loc = at(
-                        self.score,
-                        leaf.bar,
-                        leaf.lane,
-                        self.cell(leaf.bar, leaf.start),
-                    );
+                    let loc = self.location(leaf.bar, leaf.lane, leaf.start);
                     errors.push(Diag::error(
                         leaf.src,
                         loc,
@@ -541,7 +533,8 @@ impl<'a> Analysis<'a> {
                             note: end,
                         },
                         line: *line,
-                        number: j as u32 + 1,
+                        number: u32::try_from(j + 1)
+                            .expect("a chord has far fewer glissandi than u32::MAX"),
                     });
                 }
             }
@@ -550,13 +543,10 @@ impl<'a> Analysis<'a> {
     }
 
     fn resolve_ties(&mut self) {
-        let lanes: Vec<(Lane, Vec<usize>)> = self
-            .lane_leaves
-            .iter()
-            .map(|(l, v)| (*l, v.clone()))
-            .collect();
+        // Taken out while `link` borrows `self` mutably; nothing here reads `lane_leaves`.
+        let lane_leaves = std::mem::take(&mut self.lane_leaves);
         let mut errors = Vec::new();
-        for (_lane, ids) in &lanes {
+        for ids in lane_leaves.values() {
             let mut pending: HashMap<Pitch, NoteRef> = HashMap::new();
             for (k, &id) in ids.iter().enumerate() {
                 let leaf = &self.leaves[id];
@@ -615,14 +605,11 @@ impl<'a> Analysis<'a> {
                     }
                 }
             }
-            for (p, r) in pending {
+            let mut unended: Vec<(Pitch, NoteRef)> = pending.into_iter().collect();
+            unended.sort_by_key(|(_, r)| *r);
+            for (p, r) in unended {
                 let leaf = &self.leaves[r.leaf];
-                let loc = at(
-                    self.score,
-                    leaf.bar,
-                    leaf.lane,
-                    self.cell(leaf.bar, leaf.start),
-                );
+                let loc = self.location(leaf.bar, leaf.lane, leaf.start);
                 errors.push(Diag::error(
                     leaf.src,
                     loc,
@@ -630,6 +617,7 @@ impl<'a> Analysis<'a> {
                 ));
             }
         }
+        self.lane_leaves = lane_leaves;
         self.diags.extend(errors);
     }
 
@@ -641,27 +629,19 @@ impl<'a> Analysis<'a> {
         id: usize,
         errors: &mut Vec<Diag>,
     ) {
-        match src {
-            Some(s) => {
-                self.tie_starts.insert(s, here);
-            }
-            None => {
-                let leaf = &self.leaves[id];
-                let loc = at(
-                    self.score,
-                    leaf.bar,
-                    leaf.lane,
-                    self.cell(leaf.bar, leaf.start),
-                );
-                errors.push(Diag::error(
-                    leaf.src,
-                    loc,
-                    format!(
-                        "~{} has no tie start. The same pitch must sound directly before it in this lane, end here in another lane, or have ^t earlier",
-                        n.pitch
-                    ),
-                ));
-            }
+        if let Some(s) = src {
+            self.tie_starts.insert(s, here);
+        } else {
+            let leaf = &self.leaves[id];
+            let loc = self.location(leaf.bar, leaf.lane, leaf.start);
+            errors.push(Diag::error(
+                leaf.src,
+                loc,
+                format!(
+                    "~{} has no tie start. The same pitch must sound directly before it in this lane, end here in another lane, or have ^t earlier",
+                    n.pitch
+                ),
+            ));
         }
     }
 
@@ -718,82 +698,53 @@ impl<'a> Analysis<'a> {
         (self.leaves[*p].end() == self.bar_end(pb)).then_some(*p)
     }
 
-    fn pair_slurs(&mut self) {
-        struct Mark {
-            t: Frac,
-            order: usize,
-            at: NoteRef,
-            starts: Vec<crate::model::SlurStart>,
-            ends: Vec<Option<u32>>,
-            above: Option<bool>,
-        }
-        let mut marks: Vec<(Lane, Mark)> = Vec::new();
+    fn slur_marks(&self) -> Vec<(Lane, SlurMark<'a>)> {
+        let mut marks = Vec::new();
         for (id, leaf) in self.leaves.iter().enumerate() {
             let Some(ev) = leaf.event() else { continue };
             let t = self.abs(leaf.bar, leaf.start);
+            let mark = |order: usize, part: Part, slurs: &'a Slurs, tok_marks: &[TokMark]| {
+                let at = NoteRef {
+                    leaf: id,
+                    part,
+                    note: 0,
+                };
+                let mark = SlurMark {
+                    t,
+                    order,
+                    at,
+                    starts: &slurs.starts,
+                    ends: &slurs.ends,
+                    above: slur_above(tok_marks),
+                };
+                (leaf.lane, mark)
+            };
             if let Some(g) = &ev.grace {
                 for (gi, gn) in g.notes.iter().enumerate() {
-                    marks.push((
-                        leaf.lane,
-                        Mark {
-                            t,
-                            order: gi,
-                            at: NoteRef {
-                                leaf: id,
-                                part: Part::Grace(gi),
-                                note: 0,
-                            },
-                            starts: gn.slurs.starts.clone(),
-                            ends: gn.slurs.ends.clone(),
-                            above: slur_above(&gn.marks),
-                        },
-                    ));
+                    marks.push(mark(gi, Part::Grace(gi), &gn.slurs, &gn.marks));
                 }
             }
-            marks.push((
-                leaf.lane,
-                Mark {
-                    t,
-                    order: 100,
-                    at: NoteRef {
-                        leaf: id,
-                        part: Part::Main,
-                        note: 0,
-                    },
-                    starts: ev.slurs.starts.clone(),
-                    ends: ev.slurs.ends.clone(),
-                    above: slur_above(&ev.marks),
-                },
-            ));
+            marks.push(mark(100, Part::Main, &ev.slurs, &ev.marks));
             if let Some(g) = &ev.after {
                 for (gi, gn) in g.notes.iter().enumerate() {
-                    marks.push((
-                        leaf.lane,
-                        Mark {
-                            t,
-                            order: 200 + gi,
-                            at: NoteRef {
-                                leaf: id,
-                                part: Part::After(gi),
-                                note: 0,
-                            },
-                            starts: gn.slurs.starts.clone(),
-                            ends: gn.slurs.ends.clone(),
-                            above: slur_above(&gn.marks),
-                        },
-                    ));
+                    marks.push(mark(200 + gi, Part::After(gi), &gn.slurs, &gn.marks));
                 }
             }
         }
+        marks
+    }
+
+    fn pair_slurs(&mut self) {
+        let mut marks = self.slur_marks();
         marks.sort_by(|(la, a), (lb, b)| (a.t, a.order, la).cmp(&(b.t, b.order, lb)));
-        let mut stacks: HashMap<Lane, Vec<(NoteRef, Option<bool>)>> = HashMap::new();
-        let mut named: HashMap<u32, (NoteRef, Option<bool>)> = HashMap::new();
-        let mut pairs: Vec<(NoteRef, NoteRef, Option<bool>)> = Vec::new();
+        let mut stacks: BTreeMap<Lane, Vec<(NoteRef, Option<Place>)>> = BTreeMap::new();
+        let mut named: BTreeMap<u32, (NoteRef, Option<Place>)> = BTreeMap::new();
+        let mut pairs: Vec<(NoteRef, NoteRef, Option<Place>)> = Vec::new();
         let mut errors = Vec::new();
         // As the import numbers them: at one moment, all lanes end their slurs before a slur starts.
         for moment in marks.chunk_by(|(_, a), (_, b)| (a.t, a.order) == (b.t, b.order)) {
             for (lane, m) in moment {
-                for e in &m.ends {
+                for e in m.ends {
                     let open = match e {
                         Some(n) => named.remove(n),
                         None => stacks.entry(*lane).or_default().pop(),
@@ -812,11 +763,7 @@ impl<'a> Analysis<'a> {
             }
             for (lane, m) in moment {
                 for (i, s) in m.starts.iter().enumerate() {
-                    let above = if i == 0 {
-                        m.above
-                    } else {
-                        s.place.map(|p| p == Place::Above)
-                    };
+                    let above = if i == 0 { m.above } else { s.place };
                     match s.number {
                         Some(n) => {
                             if named.insert(n, (m.at, above)).is_some() {
@@ -833,15 +780,14 @@ impl<'a> Analysis<'a> {
         }
         for (r, msg) in errors {
             let leaf = &self.leaves[r.leaf];
-            let loc = at(
-                self.score,
-                leaf.bar,
-                leaf.lane,
-                self.cell(leaf.bar, leaf.start),
-            );
+            let loc = self.location(leaf.bar, leaf.lane, leaf.start);
             self.diags.push(Diag::error(leaf.src, loc, msg));
         }
-        // MusicXML readers pair slur numbers in document order: the export writes bar, lane, leaf, part.
+        self.number_slurs(pairs);
+    }
+
+    // MusicXML readers pair slur numbers in document order: the export writes bar, lane, leaf, part.
+    fn number_slurs(&mut self, pairs: Vec<(NoteRef, NoteRef, Option<Place>)>) {
         let doc = |r: NoteRef| {
             let leaf = &self.leaves[r.leaf];
             (leaf.bar, leaf.lane.order(), r.leaf, r.part)
@@ -906,9 +852,9 @@ impl<'a> Analysis<'a> {
             let notes_of = |lane: Lane| -> Vec<usize> {
                 self.lane_leaves
                     .get(&lane)
-                    .cloned()
-                    .unwrap_or_default()
                     .into_iter()
+                    .flatten()
+                    .copied()
                     .filter(|&id| {
                         self.leaves[id]
                             .event()
@@ -940,12 +886,7 @@ impl<'a> Analysis<'a> {
             };
             let first = at_start.iter().find(trilled).or(at_start.first()).copied();
             let Some(first) = first else {
-                let loc = at(
-                    self.score,
-                    start.0,
-                    Lane::Mark(staff, MarkKind::Trill, 1),
-                    self.cell(start.0, start.1),
-                );
+                let loc = self.location(start.0, Lane::Mark(staff, MarkKind::Trill, 1), start.1);
                 let src = self.src_of(start.0, Lane::Mark(staff, MarkKind::Trill, 1));
                 self.error(src, loc, "a trill line starts where its staff has no note");
                 continue;
@@ -1004,13 +945,12 @@ impl<'a> Analysis<'a> {
                         continue;
                     }
                     if *tok == Tok::Cont {
-                        match &mut open {
-                            Some(s) => s.end = (b, end),
-                            None => {
-                                let loc = at(self.score, b, lane, self.cell(b, start));
-                                let src = self.src_of(b, lane);
-                                self.error(src, loc, "`-` with no span to continue");
-                            }
+                        if let Some(s) = &mut open {
+                            s.end = (b, end);
+                        } else {
+                            let loc = self.location(b, lane, start);
+                            let src = self.src_of(b, lane);
+                            self.error(src, loc, "`-` with no span to continue");
                         }
                         continue;
                     }
@@ -1100,7 +1040,7 @@ impl<'a> Analysis<'a> {
                         if from_prev.take().is_some() || continues {
                             held_until = Some(*end);
                         } else {
-                            let loc = at(self.score, b, Lane::Ped, self.cell(b, *start));
+                            let loc = self.location(b, Lane::Ped, *start);
                             let src = line.map_or(0, |(_, s)| s);
                             self.error(src, loc, "`-` when no pedal is held");
                         }
@@ -1159,9 +1099,7 @@ impl<'a> Analysis<'a> {
         })
     }
 
-    // `slot`: a momentary mark sounds for its slot, as pno plays it; with no `slot`, only at its
-    // moment, as MusicXML readers play it.
-    fn mark_at(&self, staff: Staff, t: Frac, slot: bool) -> Option<LevelFrom> {
+    fn mark_at(&self, staff: Staff, t: Frac, player: Player) -> Option<LevelFrom> {
         let dyns: Vec<(Frac, Frac, Staff, LevelFrom)> = self
             .spans
             .iter()
@@ -1194,18 +1132,23 @@ impl<'a> Analysis<'a> {
                 base = Some(*from);
                 continue;
             };
+            let sounds_at_t = match player {
+                Player::Pno => true,
+                Player::MusicXmlReader => *start == t,
+            };
             if !mark.is_momentary() {
                 base = Some(*from);
-            } else if t < *end && (slot || *start == t) {
+            } else if t < *end && sounds_at_t {
                 return Some(*from);
-            } else if slot {
-                base = mark.after().map(LevelFrom::Mark).or(base);
             } else {
-                // MusicXML readers play the level after `fp` at the table velocity of `p`.
-                base = mark
-                    .after()
-                    .map(|m| LevelFrom::Text(m.default_velocity()))
-                    .or(base);
+                let after = match player {
+                    Player::Pno => mark.after().map(LevelFrom::Mark),
+                    // MusicXML readers play the level after `fp` at the table velocity of `p`.
+                    Player::MusicXmlReader => {
+                        mark.after().map(|m| LevelFrom::Text(m.default_velocity()))
+                    }
+                };
+                base = after.or(base);
             }
         }
         base
@@ -1220,16 +1163,16 @@ impl<'a> Analysis<'a> {
     }
 
     pub fn level_at(&self, staff: Staff, bar: usize, t: Frac) -> f64 {
-        self.level(staff, bar, t, true)
+        self.level(staff, bar, t, Player::Pno)
     }
 
     // The level a MusicXML reader gives a note from the dynamic marks alone.
     pub fn reader_level_at(&self, staff: Staff, bar: usize, t: Frac) -> f64 {
-        self.level(staff, bar, t, false)
+        self.level(staff, bar, t, Player::MusicXmlReader)
     }
 
-    fn level(&self, staff: Staff, bar: usize, t: Frac, slot: bool) -> f64 {
-        match self.mark_at(staff, self.abs(bar, t), slot) {
+    fn level(&self, staff: Staff, bar: usize, t: Frac, player: Player) -> f64 {
+        match self.mark_at(staff, self.abs(bar, t), player) {
             Some(LevelFrom::Mark(m)) => self.mark_velocity(bar, m),
             Some(LevelFrom::Text(v)) => v,
             None => DEFAULT_VELOCITY,
@@ -1320,6 +1263,13 @@ impl<'a> Analysis<'a> {
 }
 
 pub const DEFAULT_VELOCITY: f64 = 68.0;
+
+// pno plays a momentary mark for its slot; MusicXML readers play it only at its moment.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Player {
+    Pno,
+    MusicXmlReader,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum LevelFrom {

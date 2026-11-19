@@ -180,7 +180,7 @@ fn corpus_files_round_trip_or_stop_with_a_named_feature() {
     println!(
         "{} files: {round_trips} round trips ({:.1} %), {} named stops, {} unclassified, {} faults",
         files.len(),
-        100.0 * round_trips as f64 / files.len() as f64,
+        100.0 * f64::from(round_trips) / files.len() as f64,
         count(&stops),
         count(&unclassified),
         count(&faults)

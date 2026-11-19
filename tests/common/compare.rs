@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::fmt::Write as _;
 
 use roxmltree::{Document, Node, NodeId, ParsingOptions};
 
@@ -199,8 +200,7 @@ fn is_default(tag: &str, name: &str, value: &str) -> bool {
     matches!(
         (tag, name, value),
         ("strong-accent", "type", "up")
-            | ("tuplet", "number", "1")
-            | ("clef", "number", "1")
+            | ("tuplet" | "clef", "number", "1")
             | ("metronome", "parentheses", "no")
             // A clef at the start of a measure is drawn after the barline.
             | ("clef", "after-barline", "yes")
@@ -557,7 +557,7 @@ impl Rules {
         let only_words = !words.is_empty() && words.iter().all(|w| w.has_tag_name("words"));
         if tag == "direction-type" && only_words {
             // Words that follow each other are one text.
-            let text: String = words.iter().filter_map(|w| w.text()).collect();
+            let text: String = words.iter().filter_map(Node::text).collect();
             if text.trim().is_empty() {
                 return String::new();
             }
@@ -867,10 +867,10 @@ fn header(doc: &Document) -> BTreeSet<String> {
         .and_then(|n| n.text())
         .and_then(|t| t.parse().ok())
         .unwrap_or(0.0);
-    for c in root.children().filter(|n| n.is_element()) {
+    for c in root.children().filter(Node::is_element) {
         match c.tag_name().name() {
             "work" => {
-                for w in c.children().filter(|n| n.is_element()) {
+                for w in c.children().filter(Node::is_element) {
                     match w.tag_name().name() {
                         "work-title" => push_field(&mut fields, "title", &own_text(w), false),
                         "work-number" => push_field(&mut fields, "subtitle", &own_text(w), false),
@@ -881,7 +881,7 @@ fn header(doc: &Document) -> BTreeSet<String> {
             "movement-title" => push_field(&mut fields, "title", &own_text(c), true),
             "movement-number" => push_field(&mut fields, "subtitle", &own_text(c), true),
             "identification" => {
-                for i in c.children().filter(|n| n.is_element()) {
+                for i in c.children().filter(Node::is_element) {
                     let field = match (i.tag_name().name(), i.attribute("type")) {
                         ("creator", Some("composer")) => "composer",
                         ("creator", Some("arranger")) => "arranger",
@@ -1008,7 +1008,7 @@ fn tie_types<'a>(note: Node<'a, 'a>) -> Vec<&'a str> {
     kinds
 }
 
-fn without_tie(canon: String, kind: &str) -> String {
+fn without_tie(canon: &str, kind: &str) -> String {
     let mut c = canon.replace(&format!("<tie type={kind}></>"), "");
     let end = format!("type={kind}></>");
     let mut from = 0;
@@ -1041,7 +1041,7 @@ fn lone_ties(doc: &Document) -> HashMap<NodeId, Vec<&'static str>> {
         }
     }
     let mut at = (0, 1);
-    for o in offsets.iter_mut() {
+    for o in &mut offsets {
         let len = *o;
         *o = at;
         at = q_add(at, len);
@@ -1255,10 +1255,10 @@ pub fn content(xml: &str, detail: Detail) -> Content {
                     let mut c = rules.canon(e, tag);
                     // MuseScore 3 writes no tie stop on the main note of a tied grace note; pno writes one.
                     if after_tied_grace {
-                        c = without_tie(c, "stop");
+                        c = without_tie(&c, "stop");
                     }
                     for kind in lone.get(&e.id()).into_iter().flatten() {
-                        c = without_tie(c, kind);
+                        c = without_tie(&c, kind);
                     }
                     items.push(format!(
                         "{when} s{staff}v{rank} dur={length}{vel}{size} {c}"
@@ -1286,7 +1286,9 @@ pub fn content(xml: &str, detail: Detail) -> Content {
                     }
                     let level = direction_level(e).filter(|_| !repeated.contains(&e.id()));
                     match (level, shared.get(&e.id())) {
-                        (Some(v), None) => c.push_str(&format!(" level={v:.2}")),
+                        (Some(v), None) => {
+                            let _ = write!(c, " level={v:.2}");
+                        }
                         (Some(v), Some(end)) if *end == e.id() => {
                             items.push(format!("{} level s{} {v:.2}", at(t), text(e, "staff")));
                         }

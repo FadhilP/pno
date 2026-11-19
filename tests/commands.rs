@@ -168,6 +168,22 @@ fn transpose_spells_in_the_new_key_and_returns() {
 }
 
 #[test]
+fn a_transposition_past_the_octave_range_names_the_pitch() {
+    let dir = temp_dir("transpose-range");
+    let text = "@ format=1\n\n1 rh | C8 | - | - | - |\n1 lh | R |\n";
+    let f = write(&dir, "t.pno", text);
+    let run = pno(&["transpose", path(&f), "24"]);
+    assert_eq!(run.code, 1, "{}", run.stdout);
+    assert!(
+        run.stderr
+            .contains("C8 is out of range after the transposition"),
+        "{}",
+        run.stderr
+    );
+    assert_eq!(read(&f), text);
+}
+
+#[test]
 fn set_replaces_a_lane_and_adds_a_lane() {
     let dir = temp_dir("set");
     let f = write(

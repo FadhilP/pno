@@ -32,7 +32,7 @@ pub fn parse_word(lane: Lane, w: &str) -> Result<Word, String> {
         Lane::Mark(_, kind, _) => match kind {
             MarkKind::Dyn => parse_dyn(w)?,
             MarkKind::Hairpin => {
-                let (body, place) = split_place(w)?;
+                let (body, place) = split_place(w);
                 let hp = match body {
                     "<" => Hairpin::Cresc,
                     ">" => Hairpin::Dim,
@@ -41,7 +41,7 @@ pub fn parse_word(lane: Lane, w: &str) -> Result<Word, String> {
                 Tok::Hairpin(hp, place)
             }
             MarkKind::Text => {
-                let (body, place) = split_place(w)?;
+                let (body, place) = split_place(w);
                 let (text, rest) = quoted(body)?;
                 let frame = match rest {
                     "" => TextFrame::None,
@@ -91,14 +91,14 @@ pub fn parse_word(lane: Lane, w: &str) -> Result<Word, String> {
     Ok(Word::Tok(tok))
 }
 
-fn split_place(w: &str) -> Result<(&str, Option<Place>), String> {
+fn split_place(w: &str) -> (&str, Option<Place>) {
     if let Some(b) = w.strip_suffix(":above") {
-        return Ok((b, Some(Place::Above)));
+        return (b, Some(Place::Above));
     }
     if let Some(b) = w.strip_suffix(":below") {
-        return Ok((b, Some(Place::Below)));
+        return (b, Some(Place::Below));
     }
-    Ok((w, None))
+    (w, None)
 }
 
 pub fn quoted(s: &str) -> Result<(String, &str), String> {
@@ -123,7 +123,7 @@ pub fn quoted(s: &str) -> Result<(String, &str), String> {
 }
 
 fn parse_dyn(w: &str) -> Result<Tok, String> {
-    let (body, place) = split_place(w)?;
+    let (body, place) = split_place(w);
     if body.starts_with('"') {
         let (text, rest) = quoted(body)?;
         let level = match rest.strip_prefix('=') {
@@ -168,7 +168,7 @@ fn parse_mark(body: &str, place: Option<Place>) -> Result<Dyn, String> {
 }
 
 fn parse_tempo(w: &str) -> Result<Tempo, String> {
-    let (body, place) = split_place(w)?;
+    let (body, place) = split_place(w);
     let (text, rest) = if body.starts_with('"') {
         let (t, r) = quoted(body)?;
         (Some(t), r)
@@ -406,11 +406,11 @@ fn pitch(c: &mut Cursor) -> Result<Pitch, String> {
     let octave: i8 = oct.parse().map_err(|_| {
         format!("the pitch {letter}{acc} has no octave, for example {letter}{acc}4")
     })?;
-    if octave > 9 {
+    if !Pitch::OCTAVES.contains(&octave) {
         return Err(format!("octave {octave} is out of range"));
     }
     Ok(Pitch {
-        step: step as u8,
+        step: u8::try_from(step).expect("STEPS has 7 letters"),
         alter,
         octave,
     })

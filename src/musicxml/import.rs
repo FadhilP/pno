@@ -25,7 +25,7 @@ pub fn import(xml: &str, keep: Keep) -> Result<Imported, String> {
     fix::ties(&mut built, &mut rep)?;
     fix::slurs(&mut built, &mut rep);
     fix::mark_velocities(&mut built, &src.vel_lines, &mut rep);
-    fix::note_velocities(&mut built, src.vel_lines.is_empty());
+    fix::note_velocities(&mut built, &src.vel_lines);
     nothing_off_the_grid(&built)?;
     let text = crate::fmt::format(built.score, crate::fmt::Fix::No)
         .map_err(|e| format!("internal: the import cannot write the file: {e}"))?;

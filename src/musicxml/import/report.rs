@@ -105,7 +105,6 @@ impl Row {
 pub struct Report {
     counts: BTreeMap<Row, usize>,
     notes: Vec<String>,
-    pub accidentals: Option<bool>,
 }
 
 impl Report {

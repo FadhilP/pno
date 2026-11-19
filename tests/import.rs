@@ -1,5 +1,7 @@
 mod common;
 
+use std::fmt::Write as _;
+
 use common::compare::{self, Detail};
 use common::{fixtures, path, pno, root, temp_dir, write};
 
@@ -212,7 +214,7 @@ fn a_dynamic_mark_with_no_velocity_gets_the_table_velocity() {
     let bare: String = read(&xml)
         .lines()
         .filter(|l| !l.contains("<sound dynamics="))
-        .map(|l| format!("{l}\n"))
+        .flat_map(|l| [l, "\n"])
         .collect();
     let bare = write(&dir, "bare.musicxml", &bare);
     let back = dir.join("back.pno");
@@ -275,9 +277,10 @@ fn tuplet_notes(steps: &str, ticks: &[&str], kind: &str, ratio: (u32, u32)) -> S
             i if i == last => "<notations><tuplet type=\"stop\"/></notations>",
             _ => "",
         };
-        out.push_str(&format!(
+        let _ = write!(
+            out,
             "<note><pitch><step>{step}</step><octave>5</octave></pitch><duration>{ticks}</duration><voice>1</voice><type>{kind}</type><time-modification><actual-notes>{actual}</actual-notes><normal-notes>{normal}</normal-notes></time-modification><staff>1</staff>{edge}</note>"
-        ));
+        );
     }
     out
 }

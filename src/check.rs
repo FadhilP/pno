@@ -1,4 +1,4 @@
-use crate::analysis::{Analysis, NoteRef, Part};
+use crate::analysis::{Analysis, Leaf, NoteRef, Part};
 use crate::diag::Diag;
 use crate::frac::Frac;
 use crate::model::{Lane, Score, Staff};
@@ -15,8 +15,8 @@ pub fn expected_labels(score: &Score) -> Vec<String> {
         let short = l.is_partial();
         let prev = i.checked_sub(1).map(|p| &score.bars[p]);
         let prev_open = prev.is_some_and(|p| p.layout.is_partial() && !out[i - 1].ends_with('b'));
-        let second_part =
-            short && prev_open && i > 0 && (!l.lead.is_zero() || bar.label.ends_with('b'));
+        let marked_second = !l.lead.is_zero() || bar.label.ends_with('b');
+        let second_part = short && prev_open && marked_second;
         if second_part {
             out.push(format!("{}b", out[i - 1]));
             continue;
@@ -123,11 +123,9 @@ fn velocity_range(a: &Analysis, diags: &mut Vec<Diag>) {
                 .notes_of(r)
                 .map(|n| n.pitch.to_string())
                 .unwrap_or_default();
-            let loc =
-                crate::analysis::at(a.score, leaf.bar, leaf.lane, a.cell(leaf.bar, leaf.start));
             diags.push(Diag::error(
                 leaf.src,
-                loc,
+                a.location(leaf.bar, leaf.lane, leaf.start),
                 format!("the velocity of {pitch} is {v}; it must be 1 to 127"),
             ));
         }
@@ -140,7 +138,7 @@ fn sounding(a: &Analysis, bar: usize, staff: Staff, t: Frac) -> Vec<i32> {
         .filter(|l| {
             l.bar == bar && Analysis::home_staff(l.lane) == staff && l.start <= t && t < l.end()
         })
-        .filter_map(|l| l.event())
+        .filter_map(Leaf::event)
         .flat_map(|ev| ev.notes().iter().map(|n| n.pitch.midi()))
         .collect()
 }

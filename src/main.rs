@@ -56,30 +56,7 @@ enum Cmd {
         check: bool,
     },
     /// Write MusicXML or MIDI; PDF, PNG, SVG and audio through MuseScore; audio and video (.mp4) through sfizz with --sound
-    Export {
-        file: PathBuf,
-        /// Output files; the extension of each selects its format. MIDI, audio and video share one performance
-        #[arg(required = true)]
-        out: Vec<PathBuf>,
-        /// MIDI, audio and video: play with small changes of timing and velocity, as a pianist does
-        #[arg(long)]
-        humanize: bool,
-        /// The seed of --humanize; the same seed gives the same performance
-        #[arg(long, requires = "humanize")]
-        seed: Option<u64>,
-        /// MIDI, audio and video: shape each phrase with a curve of tempo and velocity; AMOUNT scales the curve (1 if not given, at most 4)
-        #[arg(long, num_args = 0..=1, default_missing_value = "1", value_name = "AMOUNT")]
-        phrase: Option<f64>,
-        /// Audio and video: play the MIDI with this SFZ instrument through sfizz, not with MuseScore
-        #[arg(long)]
-        sound: Option<PathBuf>,
-        /// MIDI, audio and video: play only a bar range, for example 9-14
-        #[arg(long)]
-        bars: Option<String>,
-        /// Video: the note colours of the upper and the lower staff, for example 5CC478,5494E4
-        #[arg(long, value_name = "RH,LH")]
-        colors: Option<String>,
-    },
+    Export(ExportArgs),
     /// Read MusicXML into a pno file; .mxl and .mscz go through MuseScore
     Import {
         file: PathBuf,
@@ -151,6 +128,32 @@ enum Cmd {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<OsString>,
     },
+}
+
+#[derive(clap::Args)]
+struct ExportArgs {
+    file: PathBuf,
+    /// Output files; the extension of each selects its format. MIDI, audio and video share one performance
+    #[arg(required = true)]
+    out: Vec<PathBuf>,
+    /// MIDI, audio and video: play with small changes of timing and velocity, as a pianist does
+    #[arg(long)]
+    humanize: bool,
+    /// The seed of --humanize; the same seed gives the same performance
+    #[arg(long, requires = "humanize")]
+    seed: Option<u64>,
+    /// MIDI, audio and video: shape each phrase with a curve of tempo and velocity; AMOUNT scales the curve (1 if not given, at most 4)
+    #[arg(long, num_args = 0..=1, default_missing_value = "1", value_name = "AMOUNT")]
+    phrase: Option<f64>,
+    /// Audio and video: play the MIDI with this SFZ instrument through sfizz, not with MuseScore
+    #[arg(long)]
+    sound: Option<PathBuf>,
+    /// MIDI, audio and video: play only a bar range, for example 9-14
+    #[arg(long)]
+    bars: Option<String>,
+    /// Video: the note colours of the upper and the lower staff, for example 5CC478,5494E4
+    #[arg(long, value_name = "RH,LH")]
+    colors: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -464,10 +467,10 @@ fn export_one(out: &Path, kind: Output, src: &Sources) -> Result<Vec<PathBuf>, S
         std::fs::write(out, bytes).map_err(|e| format!("cannot write {}: {e}", out.display()))
     };
     match (kind, src.sound) {
-        (Output::Midi, _) => write(&midi::write(src.plain.as_ref().ok_or_else(missing)?))?,
+        (Output::Midi, _) => write(&midi::write(src.plain.as_ref().ok_or_else(missing)?)?)?,
         (Output::Video, Some(sfz)) => {
             let p = src.released.as_ref().ok_or_else(missing)?;
-            let bytes = midi::write(p);
+            let bytes = midi::write(p)?;
             let wav = render::temp_path("wav");
             let silent = render::temp_path("mp4");
             let (sound, picture) = std::thread::scope(|s| {
@@ -481,11 +484,11 @@ fn export_one(out: &Path, kind: Output, src: &Sources) -> Result<Vec<PathBuf>, S
                 .and_then(|()| video::mux(&silent, &wav, out));
             let _ = std::fs::remove_file(&wav);
             let _ = std::fs::remove_file(&silent);
-            result?
+            result?;
         }
         (Output::Audio, Some(sfz)) => {
             let p = src.released.as_ref().ok_or_else(missing)?;
-            audio::render(&midi::write(p), sfz, out)?
+            audio::render(&midi::write(p)?, sfz, out)?;
         }
         (Output::MusicXml, _) => write(src.xml.as_ref().ok_or_else(missing)?.as_bytes())?,
         (Output::Video, None) => return Err(missing()),
@@ -568,167 +571,14 @@ fn run(cmd: Cmd) -> Result<(), Failure> {
             let diags = check::check(&parsed.score, &parsed.diags);
             report_check(&parsed.score, diags, None)
         }
-        Cmd::Export {
-            file,
-            out,
-            humanize,
-            seed,
-            phrase,
-            sound,
-            bars,
-            colors,
-        } => {
-            let score = checked(&file)?;
-            let a = analysis::Analysis::new(&score);
-            let kinds: Vec<Output> = out.iter().map(|p| output_kind(p)).collect();
-            let has = |k: Output| kinds.contains(&k);
-            let sampled = has(Output::Audio) || has(Output::Video);
-            if sound.is_some() && !sampled {
-                return Err(usage("--sound applies only to audio and video output"));
-            }
-            if has(Output::Video) && sound.is_none() {
-                return Err(usage("a video needs --sound for its audio"));
-            }
-            if colors.is_some() && !has(Output::Video) {
-                return Err(usage("--colors applies only to video output"));
-            }
-            let performed = has(Output::Midi) || (sampled && sound.is_some());
-            let shaped = humanize || phrase.is_some() || bars.is_some();
-            if shaped && !performed {
-                return Err(usage(
-                    "--humanize, --phrase, --sound and --bars apply only to MIDI, audio and video output",
-                ));
-            }
-            if shaped && has(Output::Audio) && sound.is_none() {
-                return Err(usage(
-                    "--humanize, --phrase and --bars need --sound for audio: MuseScore plays only the notation",
-                ));
-            }
-            let hands = match &colors {
-                Some(c) => video::Hands::parse(c).map_err(usage)?,
-                None => video::Hands::default(),
-            };
-            let shaping = match phrase {
-                None => perform::Shaping::Off,
-                Some(f) if f > 0.0 && f <= 4.0 => perform::Shaping::Phrases(f),
-                Some(_) => return Err(usage("--phrase AMOUNT is above 0 and at most 4")),
-            };
-            let bars = bars.map(|b| bar_range(&score, &b)).transpose()?;
-            let mode = match (humanize, seed) {
-                (false, _) => perform::Humanize::Off,
-                (true, Some(s)) => perform::Humanize::Seed(s),
-                (true, None) => {
-                    let s = random_seed();
-                    println!("humanize seed {s}");
-                    perform::Humanize::Seed(s)
-                }
-            };
-            let perform_with = |tail: perform::Tail| {
-                let opts = perform::Options {
-                    humanize: mode,
-                    shaping,
-                    bars: bars.clone(),
-                    tail,
-                };
-                perform::perform(&a, &opts).map_err(|msg| Failure { code: 1, msg })
-            };
-            let needs_xml = has(Output::MusicXml)
-                || has(Output::ScoreFile)
-                || (has(Output::Audio) && sound.is_none());
-            let xml_with = |pedal| {
-                musicxml::export(&a, musicxml::Scope::Full, pedal)
-                    .map_err(|e| Failure { code: 1, msg: e })
-            };
-            let src = Sources {
-                plain: has(Output::Midi)
-                    .then(|| perform_with(perform::Tail::None))
-                    .transpose()?,
-                released: (sampled && sound.is_some())
-                    .then(|| perform_with(perform::Tail::Release))
-                    .transpose()?,
-                sound: sound.as_deref(),
-                hands,
-                xml: needs_xml
-                    .then(|| xml_with(musicxml::PedalMarks::Show))
-                    .transpose()?,
-                notation_xml: has(Output::Notation)
-                    .then(|| xml_with(musicxml::PedalMarks::Hide))
-                    .transpose()?,
-            };
-            let mut failed: Vec<String> = Vec::new();
-            for (path, kind) in out.iter().zip(&kinds) {
-                match export_one(path, *kind, &src) {
-                    Ok(written) => written
-                        .iter()
-                        .for_each(|w| println!("wrote {}", w.display())),
-                    Err(e) => failed.push(e),
-                }
-            }
-            if failed.is_empty() {
-                return Ok(());
-            }
-            Err(Failure {
-                code: 1,
-                msg: failed.join("\n"),
-            })
-        }
-        Cmd::Import { file, out, keep } => {
-            let target = match out {
-                Some(p) => p,
-                None => {
-                    let p = file.with_extension("pno");
-                    if p.exists() {
-                        return Err(usage(format!(
-                            "{} exists; give the output file with -o",
-                            p.display()
-                        )));
-                    }
-                    p
-                }
-            };
-            let xml = read_musicxml(&file)?;
-            let keep = musicxml::import::Keep {
-                stems: keep.contains(&KeepItem::Stems),
-                beams: keep.contains(&KeepItem::Beams),
-            };
-            let imported =
-                musicxml::import::import(&xml, keep).map_err(|e| Failure { code: 1, msg: e })?;
-            std::fs::write(&target, imported.text)
-                .map_err(|e| usage(format!("cannot write {}: {e}", target.display())))?;
-            println!("wrote {}", target.display());
-            for line in imported.report {
-                println!("{line}");
-            }
-            Ok(())
-        }
+        Cmd::Export(args) => export(args),
+        Cmd::Import { file, out, keep } => import(&file, out, &keep),
         Cmd::Render {
             file,
             bars,
             out,
             dpi,
-        } => {
-            let score = checked(&file)?;
-            let scope = match &bars {
-                Some(b) => musicxml::Scope::Bars(bar_range(&score, b)?),
-                None => musicxml::Scope::Full,
-            };
-            let a = analysis::Analysis::new(&score);
-            let xml = musicxml::export(&a, scope, musicxml::PedalMarks::Show)
-                .map_err(|e| Failure { code: 1, msg: e })?;
-            let out = out.unwrap_or_else(|| {
-                let stem = file.file_stem().and_then(|s| s.to_str()).unwrap_or("score");
-                let part = bars.map(|b| format!("-{b}")).unwrap_or_default();
-                file.with_file_name(format!("{stem}{part}.png"))
-            });
-            let style = render::temp_path("mss");
-            std::fs::write(&style, render::IMAGE_STYLE)
-                .map_err(|e| usage(format!("cannot write {}: {e}", style.display())))?;
-            let style_arg = style.to_string_lossy();
-            let args = ["-S", &style_arg, "-T", "10", "-r", &dpi.to_string()];
-            let result = through_musescore(&xml, &out, &args);
-            let _ = std::fs::remove_file(&style);
-            result
-        }
+        } => render_png(&file, bars.as_deref(), out, dpi),
         Cmd::Sound {
             file,
             bars,
@@ -763,37 +613,7 @@ fn run(cmd: Cmd) -> Result<(), Failure> {
             print!("{}", analyze::analyze(&a, &bars, which));
             Ok(())
         }
-        Cmd::Bars { op } => {
-            let fail = |msg: String| Failure { code: 1, msg };
-            let (file, score) = match op {
-                BarsOp::Insert {
-                    file,
-                    before,
-                    count,
-                } => {
-                    let mut score = editable(&file)?;
-                    let at = bar_place(&score, &before)?;
-                    edit::insert(&mut score, at, count).map_err(fail)?;
-                    (file, score)
-                }
-                BarsOp::Delete { file, bars } => {
-                    let mut score = editable(&file)?;
-                    let range = bar_range(&score, &bars)?;
-                    for note in edit::delete(&mut score, range) {
-                        println!("removed {note}");
-                    }
-                    (file, score)
-                }
-                BarsOp::Copy { file, bars, before } => {
-                    let mut score = editable(&file)?;
-                    let range = bar_range(&score, &bars)?;
-                    let at = bar_place(&score, &before)?;
-                    edit::copy(&mut score, range, at).map_err(fail)?;
-                    (file, score)
-                }
-            };
-            save(&file, score)
-        }
+        Cmd::Bars { op } => edit_bars(op),
         Cmd::Transpose {
             file,
             semitones,
@@ -801,50 +621,13 @@ fn run(cmd: Cmd) -> Result<(), Failure> {
         } => {
             let mut score = editable(&file)?;
             let range = bars.map(|b| bar_range(&score, &b)).transpose()?;
-            let n = edit::transpose(&mut score, semitones, range)
+            let n = edit::transpose(&mut score, semitones, range.as_ref())
                 .map_err(|msg| Failure { code: 1, msg })?;
             println!("transposed {n} notes");
             save(&file, score)
         }
-        Cmd::Set { file, lines } => {
-            let score = editable(&file)?;
-            let old = std::fs::read_to_string(&file)
-                .map_err(|e| usage(format!("cannot read {}: {e}", file.display())))?;
-            let labels: Vec<&str> = score.bars.iter().map(|b| b.label.as_str()).collect();
-            let text = edit::set_lines(&old, &labels, &lines).map_err(usage)?;
-            let parsed = text::parse::parse(&text);
-            if !parsed.diags.is_empty() {
-                print_diags(&parsed.diags);
-                return Err(Failure {
-                    code: 1,
-                    msg: format!(
-                        "the new lines do not parse; {} is not changed",
-                        file.display()
-                    ),
-                });
-            }
-            save(&file, parsed.score)?;
-            let new = std::fs::read_to_string(&file)
-                .map_err(|e| usage(format!("cannot read {}: {e}", file.display())))?;
-            print_changed_lines(&old, &new);
-            Ok(())
-        }
-        Cmd::Phrase { file } => {
-            let mut score = editable(&file)?;
-            let found = edit::add_phrases(&mut score).map_err(|msg| Failure { code: 1, msg })?;
-            for p in &found {
-                let bar = &score.bars[p.bar];
-                let cell = bar.layout.cell_at(p.time) + 1;
-                println!(
-                    "{} cell {cell}: {} ({})",
-                    bar.label,
-                    p.mark.text(),
-                    p.reason.text()
-                );
-            }
-            println!("marked {} phrases", found.len());
-            save(&file, score)
-        }
+        Cmd::Set { file, lines } => set(&file, &lines),
+        Cmd::Phrase { file } => mark_phrases(&file),
         Cmd::Spec { section } => spec(section.as_deref()),
         Cmd::A2p { args } => match a2p::run(&args).map_err(|msg| Failure { code: 1, msg })? {
             0 => Ok(()),
@@ -854,4 +637,239 @@ fn run(cmd: Cmd) -> Result<(), Failure> {
             }),
         },
     }
+}
+
+fn export(args: ExportArgs) -> Result<(), Failure> {
+    let ExportArgs {
+        file,
+        out,
+        humanize,
+        seed,
+        phrase,
+        sound,
+        bars,
+        colors,
+    } = args;
+    let score = checked(&file)?;
+    let a = analysis::Analysis::new(&score);
+    let kinds: Vec<Output> = out.iter().map(|p| output_kind(p)).collect();
+    let has = |k: Output| kinds.contains(&k);
+    let sampled = has(Output::Audio) || has(Output::Video);
+    if sound.is_some() && !sampled {
+        return Err(usage("--sound applies only to audio and video output"));
+    }
+    if has(Output::Video) && sound.is_none() {
+        return Err(usage("a video needs --sound for its audio"));
+    }
+    if colors.is_some() && !has(Output::Video) {
+        return Err(usage("--colors applies only to video output"));
+    }
+    let sampled_with_sound = sampled && sound.is_some();
+    let performed = has(Output::Midi) || sampled_with_sound;
+    let shaped = humanize || phrase.is_some() || bars.is_some();
+    if shaped && !performed {
+        return Err(usage(
+            "--humanize, --phrase, --sound and --bars apply only to MIDI, audio and video output",
+        ));
+    }
+    if shaped && has(Output::Audio) && sound.is_none() {
+        return Err(usage(
+            "--humanize, --phrase and --bars need --sound for audio: MuseScore plays only the notation",
+        ));
+    }
+    let hands = match &colors {
+        Some(c) => video::Hands::parse(c).map_err(usage)?,
+        None => video::Hands::default(),
+    };
+    let shaping = match phrase {
+        None => perform::Shaping::Off,
+        Some(f) if f > 0.0 && f <= 4.0 => perform::Shaping::Phrases(f),
+        Some(_) => return Err(usage("--phrase AMOUNT is above 0 and at most 4")),
+    };
+    let bars = bars.map(|b| bar_range(&score, &b)).transpose()?;
+    let mode = match (humanize, seed) {
+        (false, _) => perform::Humanize::Off,
+        (true, Some(s)) => perform::Humanize::Seed(s),
+        (true, None) => {
+            let s = random_seed();
+            println!("humanize seed {s}");
+            perform::Humanize::Seed(s)
+        }
+    };
+    let perform_with = |tail: perform::Tail| {
+        let opts = perform::Options {
+            humanize: mode,
+            shaping,
+            bars: bars.clone(),
+            tail,
+        };
+        perform::perform(&a, &opts).map_err(|msg| Failure { code: 1, msg })
+    };
+    let musescore_audio = has(Output::Audio) && sound.is_none();
+    let needs_xml = has(Output::MusicXml) || has(Output::ScoreFile) || musescore_audio;
+    let xml_with = |pedal| {
+        musicxml::export(&a, musicxml::Scope::Full, pedal).map_err(|e| Failure { code: 1, msg: e })
+    };
+    let src = Sources {
+        plain: has(Output::Midi)
+            .then(|| perform_with(perform::Tail::None))
+            .transpose()?,
+        released: sampled_with_sound
+            .then(|| perform_with(perform::Tail::Release))
+            .transpose()?,
+        sound: sound.as_deref(),
+        hands,
+        xml: needs_xml
+            .then(|| xml_with(musicxml::PedalMarks::Show))
+            .transpose()?,
+        notation_xml: has(Output::Notation)
+            .then(|| xml_with(musicxml::PedalMarks::Hide))
+            .transpose()?,
+    };
+    let mut failed: Vec<String> = Vec::new();
+    for (path, kind) in out.iter().zip(&kinds) {
+        match export_one(path, *kind, &src) {
+            Ok(written) => written
+                .iter()
+                .for_each(|w| println!("wrote {}", w.display())),
+            Err(e) => failed.push(e),
+        }
+    }
+    if failed.is_empty() {
+        return Ok(());
+    }
+    Err(Failure {
+        code: 1,
+        msg: failed.join("\n"),
+    })
+}
+
+fn import(file: &Path, out: Option<PathBuf>, keep: &[KeepItem]) -> Result<(), Failure> {
+    let target = if let Some(p) = out {
+        p
+    } else {
+        let p = file.with_extension("pno");
+        if p.exists() {
+            return Err(usage(format!(
+                "{} exists; give the output file with -o",
+                p.display()
+            )));
+        }
+        p
+    };
+    let xml = read_musicxml(file)?;
+    let keep = musicxml::import::Keep {
+        stems: keep.contains(&KeepItem::Stems),
+        beams: keep.contains(&KeepItem::Beams),
+    };
+    let imported = musicxml::import::import(&xml, keep).map_err(|e| Failure { code: 1, msg: e })?;
+    std::fs::write(&target, imported.text)
+        .map_err(|e| usage(format!("cannot write {}: {e}", target.display())))?;
+    println!("wrote {}", target.display());
+    for line in imported.report {
+        println!("{line}");
+    }
+    Ok(())
+}
+
+fn render_png(
+    file: &Path,
+    bars: Option<&str>,
+    out: Option<PathBuf>,
+    dpi: u32,
+) -> Result<(), Failure> {
+    let score = checked(file)?;
+    let scope = match bars {
+        Some(b) => musicxml::Scope::Bars(bar_range(&score, b)?),
+        None => musicxml::Scope::Full,
+    };
+    let a = analysis::Analysis::new(&score);
+    let xml = musicxml::export(&a, scope, musicxml::PedalMarks::Show)
+        .map_err(|e| Failure { code: 1, msg: e })?;
+    let out = out.unwrap_or_else(|| {
+        let stem = file.file_stem().and_then(|s| s.to_str()).unwrap_or("score");
+        let part = bars.map(|b| format!("-{b}")).unwrap_or_default();
+        file.with_file_name(format!("{stem}{part}.png"))
+    });
+    let style = render::temp_path("mss");
+    std::fs::write(&style, render::IMAGE_STYLE)
+        .map_err(|e| usage(format!("cannot write {}: {e}", style.display())))?;
+    let style_arg = style.to_string_lossy();
+    let args = ["-S", &style_arg, "-T", "10", "-r", &dpi.to_string()];
+    let result = through_musescore(&xml, &out, &args);
+    let _ = std::fs::remove_file(&style);
+    result
+}
+
+fn edit_bars(op: BarsOp) -> Result<(), Failure> {
+    let fail = |msg: String| Failure { code: 1, msg };
+    let (file, score) = match op {
+        BarsOp::Insert {
+            file,
+            before,
+            count,
+        } => {
+            let mut score = editable(&file)?;
+            let at = bar_place(&score, &before)?;
+            edit::insert(&mut score, at, count).map_err(fail)?;
+            (file, score)
+        }
+        BarsOp::Delete { file, bars } => {
+            let mut score = editable(&file)?;
+            let range = bar_range(&score, &bars)?;
+            for note in edit::delete(&mut score, range) {
+                println!("removed {note}");
+            }
+            (file, score)
+        }
+        BarsOp::Copy { file, bars, before } => {
+            let mut score = editable(&file)?;
+            let range = bar_range(&score, &bars)?;
+            let at = bar_place(&score, &before)?;
+            edit::copy(&mut score, range, at).map_err(fail)?;
+            (file, score)
+        }
+    };
+    save(&file, score)
+}
+
+fn set(file: &Path, lines: &[String]) -> Result<(), Failure> {
+    let score = editable(file)?;
+    let old = std::fs::read_to_string(file)
+        .map_err(|e| usage(format!("cannot read {}: {e}", file.display())))?;
+    let labels: Vec<&str> = score.bars.iter().map(|b| b.label.as_str()).collect();
+    let text = edit::set_lines(&old, &labels, lines).map_err(usage)?;
+    let parsed = text::parse::parse(&text);
+    if !parsed.diags.is_empty() {
+        print_diags(&parsed.diags);
+        return Err(Failure {
+            code: 1,
+            msg: format!(
+                "the new lines do not parse; {} is not changed",
+                file.display()
+            ),
+        });
+    }
+    save(file, parsed.score)?;
+    let new = std::fs::read_to_string(file)
+        .map_err(|e| usage(format!("cannot read {}: {e}", file.display())))?;
+    print_changed_lines(&old, &new);
+    Ok(())
+}
+
+fn mark_phrases(file: &Path) -> Result<(), Failure> {
+    let mut score = editable(file)?;
+    let found = edit::add_phrases(&mut score).map_err(|msg| Failure { code: 1, msg })?;
+    for p in &found {
+        let bar = &score.bars[p.bar];
+        let cell = bar.layout.cell_at(p.time) + 1;
+        println!(
+            "{} cell {cell}: {} ({})",
+            bar.label,
+            p.mark.text(),
+            p.reason.text()
+        );
+    }
+    println!("marked {} phrases", found.len());
+    save(file, score)
 }

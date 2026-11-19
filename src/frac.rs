@@ -21,6 +21,10 @@ pub fn lcm(a: i64, b: i64) -> i64 {
     a / gcd(a, b) * b
 }
 
+fn pow2_exponent(n: i64) -> i32 {
+    i32::try_from(n.trailing_zeros()).expect("an i64 has at most 64 trailing zeros")
+}
+
 impl Frac {
     pub const ZERO: Frac = Frac { num: 0, den: 1 };
 
@@ -57,10 +61,10 @@ impl Frac {
     pub fn log2(self) -> Option<i32> {
         let is_pow2 = |n: i64| n > 0 && n & (n - 1) == 0;
         if self.num == 1 && is_pow2(self.den) {
-            return Some(-(self.den.trailing_zeros() as i32));
+            return Some(-pow2_exponent(self.den));
         }
         if self.den == 1 && is_pow2(self.num) {
-            return Some(self.num.trailing_zeros() as i32);
+            return Some(pow2_exponent(self.num));
         }
         None
     }

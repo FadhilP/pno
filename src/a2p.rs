@@ -6,8 +6,8 @@ const A2P: &str = include_str!("../skill/audio-to-pno/scripts/a2p.py");
 const SETUP_ENV: &str = include_str!("../skill/audio-to-pno/scripts/setup_env.py");
 const REQUIREMENTS: &str = include_str!("../skill/audio-to-pno/requirements.txt");
 
-/// Runs a2p.py in its venv and returns its exit code. The first run, and the first run after a change of
-/// setup_env.py or requirements.txt, runs setup_env.py before it.
+// The first run, and the first run after a change of setup_env.py or requirements.txt, runs
+// setup_env.py before a2p.py.
 pub fn run(args: &[OsString]) -> Result<i32, String> {
     // the folder of Python's Path.home(), where setup_env.py puts the venv
     let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })

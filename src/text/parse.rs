@@ -26,6 +26,12 @@ enum Body {
     Grid(Lane, Vec<Raw>),
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Nesting {
+    Top,
+    InGroup,
+}
+
 pub struct Parsed {
     pub score: Score,
     pub diags: Vec<Diag>,
@@ -128,24 +134,24 @@ fn lex(s: &str) -> Result<Vec<Raw>, String> {
     let mut chars: Vec<char> = s.chars().collect();
     chars.push(' ');
     let mut i = 0;
-    let items = lex_items(&chars, &mut i, false)?;
+    let items = lex_items(&chars, &mut i, Nesting::Top)?;
     Ok(items)
 }
 
-fn lex_items(c: &[char], i: &mut usize, in_group: bool) -> Result<Vec<Raw>, String> {
+fn lex_items(c: &[char], i: &mut usize, nesting: Nesting) -> Result<Vec<Raw>, String> {
     let mut items = Vec::new();
     loop {
         while *i < c.len() && c[*i].is_whitespace() {
             *i += 1;
         }
         let Some(&ch) = c.get(*i) else {
-            if in_group {
+            if nesting == Nesting::InGroup {
                 return Err("a group has no closing `]`".into());
             }
             return Ok(items);
         };
         match ch {
-            ']' if in_group => {
+            ']' if nesting == Nesting::InGroup => {
                 *i += 1;
                 return Ok(items);
             }
@@ -156,7 +162,7 @@ fn lex_items(c: &[char], i: &mut usize, in_group: bool) -> Result<Vec<Raw>, Stri
             }
             _ => {
                 if let Some(head) = group_head(c, i)? {
-                    let inner = lex_items(c, i, true)?;
+                    let inner = lex_items(c, i, Nesting::InGroup)?;
                     items.push(Raw::Group(head, inner));
                     if c.get(*i)
                         .is_some_and(|ch| !ch.is_whitespace() && *ch != '|' && *ch != ']')
@@ -285,7 +291,7 @@ fn assemble(lines: Vec<SrcLine>, header: &[Attr], diags: &mut Vec<Diag>) -> Vec<
                 if groups.iter().any(|(l, _)| *l == line.label) {
                     diags.push(Diag::error(
                         line.src,
-                        line.label.clone(),
+                        line.label,
                         "the lines of a bar must be together; this bar number is used before",
                     ));
                     continue;
@@ -326,28 +332,7 @@ fn assemble_bar(
     diags: &mut Vec<Diag>,
 ) -> Bar {
     let src = lines.first().map_or(0, |l| l.src);
-    let mut attrs = Vec::new();
-    let mut grid: Vec<GridLine> = Vec::new();
-    for line in lines {
-        match line.body {
-            Body::Attrs(a) => attrs.extend(a),
-            Body::Grid(lane, raw) => {
-                if grid.iter().any(|g| g.lane == lane) {
-                    diags.push(Diag::error(
-                        line.src,
-                        format!("{label} {lane}"),
-                        "this lane appears twice in the bar",
-                    ));
-                    continue;
-                }
-                grid.push(GridLine {
-                    src: line.src,
-                    lane,
-                    raw,
-                });
-            }
-        }
-    }
+    let (attrs, grid) = attrs_and_grid(&label, lines, diags);
     for a in &attrs {
         if let Attr::Time(m) = a {
             *meter = m.clone();
@@ -417,22 +402,7 @@ fn assemble_bar(
         }
         match layout_line(g.lane, &g.raw, &layout.cells) {
             Ok(els) => {
-                let lead = match els.first() {
-                    Some(El {
-                        kind: ElKind::Tok(Tok::Gap),
-                        dur,
-                        ..
-                    }) => *dur,
-                    _ => Frac::ZERO,
-                };
-                let trail = match els.last() {
-                    Some(El {
-                        kind: ElKind::Tok(Tok::Gap),
-                        dur,
-                        ..
-                    }) if els.len() > 1 || lead.is_zero() => *dur,
-                    _ => Frac::ZERO,
-                };
+                let (lead, trail) = edge_gaps(&els);
                 match &x_slots {
                     None => x_slots = Some((lead, trail, g.lane.to_string())),
                     Some((l, t, first)) if (*l, *t) != (lead, trail) => {
@@ -465,35 +435,9 @@ fn assemble_bar(
     }
     for g in bar_rests {
         let Raw::Word(w) = &g.raw[1] else { continue };
-        let at = format!("{label} {}", g.lane);
-        if !g.lane.is_voice() {
-            diags.push(Diag::error(
-                g.src,
-                at,
-                "R is a whole-bar rest; it is only in a voice lane",
-            ));
-            continue;
-        }
-        match crate::text::token::parse_event(w) {
-            Ok(
-                ev @ Event {
-                    head: Head::BarRest,
-                    ..
-                },
-            ) if ev.grace.is_none() && ev.after.is_none() => {
-                let el = El {
-                    start: layout.lead,
-                    dur: layout.length(),
-                    kind: ElKind::Tok(Tok::Event(Box::new(ev))),
-                };
-                out_lines.push(Line {
-                    lane: g.lane,
-                    src: g.src,
-                    els: vec![el],
-                });
-            }
-            Ok(_) => diags.push(Diag::error(g.src, at, "R takes only `:` marks")),
-            Err(e) => diags.push(Diag::error(g.src, at, e)),
+        match bar_rest_line(&label, &g, w, &layout) {
+            Ok(line) => out_lines.push(line),
+            Err(d) => diags.push(d),
         }
     }
     Bar {
@@ -502,6 +446,88 @@ fn assemble_bar(
         attrs,
         lines: out_lines,
         layout,
+    }
+}
+
+fn attrs_and_grid(
+    label: &str,
+    lines: Vec<SrcLine>,
+    diags: &mut Vec<Diag>,
+) -> (Vec<Attr>, Vec<GridLine>) {
+    let mut attrs = Vec::new();
+    let mut grid: Vec<GridLine> = Vec::new();
+    for line in lines {
+        match line.body {
+            Body::Attrs(a) => attrs.extend(a),
+            Body::Grid(lane, raw) => {
+                if grid.iter().any(|g| g.lane == lane) {
+                    diags.push(Diag::error(
+                        line.src,
+                        format!("{label} {lane}"),
+                        "this lane appears twice in the bar",
+                    ));
+                    continue;
+                }
+                grid.push(GridLine {
+                    src: line.src,
+                    lane,
+                    raw,
+                });
+            }
+        }
+    }
+    (attrs, grid)
+}
+
+fn edge_gaps(els: &[El]) -> (Frac, Frac) {
+    let lead = match els.first() {
+        Some(El {
+            kind: ElKind::Tok(Tok::Gap),
+            dur,
+            ..
+        }) => *dur,
+        _ => Frac::ZERO,
+    };
+    let trail = match els.last() {
+        Some(El {
+            kind: ElKind::Tok(Tok::Gap),
+            dur,
+            ..
+        }) if els.len() > 1 || lead.is_zero() => *dur,
+        _ => Frac::ZERO,
+    };
+    (lead, trail)
+}
+
+fn bar_rest_line(label: &str, g: &GridLine, word: &str, layout: &BarLayout) -> Result<Line, Diag> {
+    let at = format!("{label} {}", g.lane);
+    if !g.lane.is_voice() {
+        return Err(Diag::error(
+            g.src,
+            at,
+            "R is a whole-bar rest; it is only in a voice lane",
+        ));
+    }
+    match crate::text::token::parse_event(word) {
+        Ok(
+            ev @ Event {
+                head: Head::BarRest,
+                ..
+            },
+        ) if ev.grace.is_none() && ev.after.is_none() => {
+            let el = El {
+                start: layout.lead,
+                dur: layout.length(),
+                kind: ElKind::Tok(Tok::Event(Box::new(ev))),
+            };
+            Ok(Line {
+                lane: g.lane,
+                src: g.src,
+                els: vec![el],
+            })
+        }
+        Ok(_) => Err(Diag::error(g.src, at, "R takes only `:` marks")),
+        Err(e) => Err(Diag::error(g.src, at, e)),
     }
 }
 
@@ -540,8 +566,12 @@ fn cell_count(raw: &[Raw]) -> usize {
 
 type LayoutError = (Frac, String);
 
+fn count_i64(n: usize) -> i64 {
+    i64::try_from(n).expect("a slot count fits in i64")
+}
+
 fn valid_slot_count(cell: Frac, n: usize) -> bool {
-    cell_counts(cell).contains(&(n as i64))
+    cell_counts(cell).contains(&count_i64(n))
 }
 
 fn layout_line(lane: Lane, raw: &[Raw], cells: &[Frac]) -> Result<Vec<El>, LayoutError> {
@@ -596,13 +626,13 @@ fn layout_line(lane: Lane, raw: &[Raw], cells: &[Frac]) -> Result<Vec<El>, Layou
                 ),
             ));
         }
-        let d = cell / chunk.len() as i64;
+        let d = cell / count_i64(chunk.len());
         for (k, r) in chunk.iter().enumerate() {
-            slots.push((at + d * k as i64, d, r));
+            slots.push((at + d * count_i64(k), d, r));
         }
         ci += 1;
     }
-    let els = build(lane, slots, &starts, true)?;
+    let els = build(lane, slots, &starts, Nesting::Top)?;
     check_gaps(&els, cells)?;
     Ok(els)
 }
@@ -635,7 +665,7 @@ fn has_gap(els: &[El]) -> bool {
     els.iter().any(|e| match &e.kind {
         ElKind::Tok(Tok::Gap) => true,
         ElKind::Group(_, c) => has_gap(c),
-        _ => false,
+        ElKind::Tok(_) => false,
     })
 }
 
@@ -643,7 +673,7 @@ fn build(
     lane: Lane,
     slots: Vec<(Frac, Frac, &Raw)>,
     bounds: &[Frac],
-    top: bool,
+    nesting: Nesting,
 ) -> Result<Vec<El>, LayoutError> {
     let mut els: Vec<El> = Vec::new();
     let mut inner: Vec<Option<&[Raw]>> = Vec::new();
@@ -659,7 +689,7 @@ fn build(
                 inner.push(Some(items));
             }
             Raw::Word(w) => match parse_word(lane, w).map_err(|e| (start, e))? {
-                Word::Dash => extend(lane, &mut els, &mut inner, start, dur, top)?,
+                Word::Dash => extend(lane, &mut els, &mut inner, start, dur, nesting)?,
                 Word::Tok(tok) => {
                     if matches!(&tok, Tok::Event(ev) if ev.head == Head::BarRest) {
                         return Err((
@@ -692,7 +722,7 @@ fn extend(
     inner: &mut Vec<Option<&[Raw]>>,
     start: Frac,
     dur: Frac,
-    top: bool,
+    nesting: Nesting,
 ) -> Result<(), LayoutError> {
     // Outside a voice lane a group is only a time grid, so a `-` after it continues the span.
     let after_group = matches!(els.last().map(|e| &e.kind), Some(ElKind::Group(..)));
@@ -706,7 +736,7 @@ fn extend(
         return Ok(());
     }
     let Some(last) = els.last_mut() else {
-        if !top && !lane.is_span() {
+        if nesting == Nesting::InGroup && !lane.is_span() {
             return Err((start, "`-` at the start of a group".into()));
         }
         if lane.is_span() {
@@ -783,7 +813,7 @@ fn layout_group(
         };
         return Err((start, msg));
     }
-    let slot = dur / n as i64;
+    let slot = dur / count_i64(n);
     let mut slots = Vec::new();
     let mut k = 0i64;
     for r in items {
@@ -800,7 +830,7 @@ fn layout_group(
         slots.push((start + slot * k, slot, r));
         k += 1;
     }
-    build(lane, slots, bounds, false)
+    build(lane, slots, bounds, Nesting::InGroup)
 }
 
 fn merge(els: Vec<El>) -> Vec<El> {
@@ -808,8 +838,8 @@ fn merge(els: Vec<El>) -> Vec<El> {
     for e in els {
         if let Some(last) = out.last_mut() {
             let joins = match (&last.kind, &e.kind) {
-                (ElKind::Tok(Tok::Empty), ElKind::Tok(Tok::Empty)) => true,
-                (ElKind::Tok(Tok::Gap), ElKind::Tok(Tok::Gap)) => true,
+                (ElKind::Tok(Tok::Empty), ElKind::Tok(Tok::Empty))
+                | (ElKind::Tok(Tok::Gap), ElKind::Tok(Tok::Gap)) => true,
                 (ElKind::Tok(t), ElKind::Tok(Tok::Empty)) => t.is_point(),
                 _ => false,
             };

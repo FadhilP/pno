@@ -208,7 +208,7 @@ fn parse_key(v: &str) -> Option<Key> {
     };
     let i = table.iter().position(|k| *k == tonic)?;
     Some(Key {
-        fifths: i as i8 - 7,
+        fifths: i8::try_from(i).expect("a key table has 15 keys") - 7,
         mode: Some(mode),
     })
 }
@@ -339,7 +339,7 @@ impl fmt::Display for Meter {
 
 impl fmt::Display for Key {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let i = (self.fifths + 7) as usize;
+        let i = usize::try_from(self.fifths + 7).expect("a key has -7 to 7 fifths");
         match self.mode {
             Some(Mode::Major) => f.write_str(MAJOR_KEYS[i]),
             Some(Mode::Minor) => write!(f, "{}m", MINOR_KEYS[i]),

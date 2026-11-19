@@ -1,11 +1,11 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::accidental::key_alter;
 use crate::analysis::{Analysis, NoteRef, Part, PedalAction, flatten};
 use crate::frac::Frac;
 use crate::model::{
-    ArpKind, Articulation, Attr, BarStyle, GroupHead, Jump, Lane, MarkKind, Mode, Note,
-    OrnamentKind, PhraseMark, Pitch, PitchMark, Score, Sign, Staff, Tok, TokMark,
+    ArpKind, Articulation, Attr, Bar, BarStyle, Event, GroupHead, Jump, Lane, MarkKind, Mode, Note,
+    OrnamentKind, PhraseMark, Pitch, PitchMark, Score, Sign, Staff, TempoMark, Tok, TokMark,
 };
 
 pub const TICKS_PER_QUARTER: f64 = 480.0;
@@ -275,7 +275,12 @@ pub fn perform(a: &Analysis, opts: &Options) -> Result<Performance, String> {
         let first = raw.len();
         for &id in &by_bar[inst.bar] {
             let at = inst.start + ticks(a.leaves[id].start - lead);
-            leaf_notes(a, id, at, &tempo, legato.contains(&id), &mut raw);
+            let touch = if legato.contains(&id) {
+                Touch::Legato
+            } else {
+                Touch::Plain
+            };
+            leaf_notes(a, id, at, &tempo, touch, &mut raw);
         }
         for r in &mut raw[first..] {
             r.segment = segment;
@@ -338,20 +343,40 @@ fn instances(score: &Score) -> Vec<Instance> {
 #[derive(Clone, Copy, PartialEq)]
 enum After {
     Repeats,
-    Jumped { to_fine: bool, to_coda: bool },
+    Jumped(Until),
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Until {
+    End,
+    Fine,
+    Coda,
+}
+
+fn volta(bar: &Bar) -> Option<&[u32]> {
+    bar.attrs.iter().find_map(|a| match a {
+        Attr::Volta { numbers, .. } => Some(numbers.as_slice()),
+        _ => None,
+    })
+}
+
+fn is_last_ending(bars: &[Bar], b: usize) -> bool {
+    let in_volta = |x: &usize| volta(&bars[*x]).is_some();
+    let run_end = (b..bars.len()).take_while(in_volta).last().unwrap_or(b);
+    let run_start = (0..=b).rev().take_while(in_volta).last().unwrap_or(b);
+    let top = (run_start..=run_end)
+        .filter_map(|x| volta(&bars[x]))
+        .flatten()
+        .copied()
+        .max()
+        .unwrap_or(0);
+    volta(&bars[b]).is_some_and(|n| n.contains(&top))
 }
 
 // The bars in the order they sound: repeats, voltas and jumps played out.
 // After a jump the repeats are not played again and each volta plays its last ending.
 fn play_order(score: &Score) -> Vec<usize> {
     let bars = &score.bars;
-    let has = |b: usize, f: &dyn Fn(&Attr) -> bool| bars[b].attrs.iter().any(f);
-    let volta = |b: usize| {
-        bars[b].attrs.iter().find_map(|a| match a {
-            Attr::Volta { numbers, .. } => Some(numbers.clone()),
-            _ => None,
-        })
-    };
     let repeat = |b: usize| {
         bars[b].attrs.iter().find_map(|a| match a {
             Attr::Repeat { start, end } => Some((*start, *end)),
@@ -364,23 +389,9 @@ fn play_order(score: &Score) -> Vec<usize> {
             _ => None,
         })
     };
-    let sign = |s: Sign| (0..bars.len()).find(|&b| has(b, &|a| *a == Attr::Sign(s)));
-    let last_ending = |b: usize| {
-        let run_end = (b..bars.len())
-            .take_while(|&x| volta(x).is_some())
-            .last()
-            .unwrap_or(b);
-        let run_start = (0..=b)
-            .rev()
-            .take_while(|&x| volta(x).is_some())
-            .last()
-            .unwrap_or(b);
-        let top = (run_start..=run_end)
-            .filter_map(volta)
-            .flatten()
-            .max()
-            .unwrap_or(0);
-        volta(b).is_some_and(|n| n.contains(&top))
+    let sign = |s: Sign| {
+        bars.iter()
+            .position(|bar| bar.attrs.contains(&Attr::Sign(s)))
     };
 
     let mut order = Vec::new();
@@ -394,10 +405,10 @@ fn play_order(score: &Score) -> Vec<usize> {
             pass = 1;
         }
         back = false;
-        if let Some(numbers) = volta(b) {
+        if let Some(numbers) = volta(&bars[b]) {
             let plays = match state {
                 After::Repeats => numbers.contains(&pass),
-                After::Jumped { .. } => last_ending(b),
+                After::Jumped(_) => is_last_ending(bars, b),
             };
             if !plays {
                 b += 1;
@@ -406,20 +417,18 @@ fn play_order(score: &Score) -> Vec<usize> {
         }
         order.push(b);
         let j = jump(b);
-        if let After::Jumped { to_fine, to_coda } = state {
-            if to_fine && j == Some(Jump::Fine) {
-                break;
-            }
-            if to_coda && j == Some(Jump::ToCoda) {
-                match sign(Sign::Coda) {
-                    Some(coda) => b = coda,
-                    None => break,
+        if let After::Jumped(until) = state {
+            match (until, j) {
+                (Until::Fine, Some(Jump::Fine)) => break,
+                (Until::Coda, Some(Jump::ToCoda)) => {
+                    match sign(Sign::Coda) {
+                        Some(coda) => b = coda,
+                        None => break,
+                    }
+                    state = After::Jumped(Until::End);
+                    continue;
                 }
-                state = After::Jumped {
-                    to_fine: false,
-                    to_coda: false,
-                };
-                continue;
+                _ => {}
             }
         }
         if state == After::Repeats {
@@ -433,7 +442,7 @@ fn play_order(score: &Score) -> Vec<usize> {
                 pass = 1;
                 start = b + 1;
             }
-            let volta_ends = volta(b).is_some() && (b + 1 >= bars.len() || volta(b + 1).is_none());
+            let volta_ends = volta(&bars[b]).is_some() && bars.get(b + 1).and_then(volta).is_none();
             if volta_ends {
                 pass = 1;
                 start = b + 1;
@@ -444,10 +453,12 @@ fn play_order(score: &Score) -> Vec<usize> {
                 _ => None,
             };
             if let Some(t) = target {
-                state = After::Jumped {
-                    to_fine: matches!(j, Some(Jump::DcFine | Jump::DsFine)),
-                    to_coda: matches!(j, Some(Jump::DcCoda | Jump::DsCoda)),
+                let until = match j {
+                    Some(Jump::DcFine | Jump::DsFine) => Until::Fine,
+                    Some(Jump::DcCoda | Jump::DsCoda) => Until::Coda,
+                    _ => Until::End,
                 };
+                state = After::Jumped(until);
                 b = t;
                 continue;
             }
@@ -478,7 +489,7 @@ fn tempo_map(
             for (start, _, tok) in flatten(&line.els) {
                 let (text, ext) = match tok {
                     Tok::Tempo(t) => {
-                        if let Some(q) = t.mark.as_ref().map(|m| m.quarters_per_minute()) {
+                        if let Some(q) = t.mark.as_ref().map(TempoMark::quarters_per_minute) {
                             marks.push((local(start), q));
                         }
                         (t.text.as_deref(), t.ext)
@@ -499,41 +510,7 @@ fn tempo_map(
                 words.push((local(start), local(start) + ticks(len), word));
             }
         }
-        for &id in &by_bar[inst.bar] {
-            let leaf = &a.leaves[id];
-            let held = leaf.event().is_some_and(|ev| {
-                ev.marks
-                    .iter()
-                    .any(|m| matches!(m, TokMark::Fermata { .. }))
-            });
-            if held {
-                holds.push(Hold {
-                    from: local(leaf.start),
-                    to: local(leaf.end()),
-                    stretch: FERMATA_STRETCH,
-                });
-            }
-            if let Some((len, stretch)) = a.pauses.get(&id).and_then(|m| pause_hold(*m)) {
-                let to = local(leaf.end());
-                holds.push(Hold {
-                    from: to - len,
-                    to,
-                    stretch,
-                });
-            }
-        }
-        let barline_fermata = bar
-            .attrs
-            .iter()
-            .any(|at| matches!(at, Attr::Barline { fermata: true, .. }));
-        if barline_fermata {
-            let to = inst.start + ticks(bar.layout.length());
-            holds.push(Hold {
-                from: to - BARLINE_HOLD.0,
-                to,
-                stretch: BARLINE_HOLD.1,
-            });
-        }
+        holds.extend(bar_holds(a, inst, &by_bar[inst.bar]));
     }
     marks.sort_by(|x, y| x.0.total_cmp(&y.0));
     let base = |t: f64| {
@@ -547,12 +524,12 @@ fn tempo_map(
     let mut cuts: Vec<f64> = marks.iter().map(|m| m.0).collect();
     cuts.extend(holds.iter().flat_map(|h| [h.from, h.to]));
     for r in &ramps {
-        let steps = ((r.to - r.from) / CURVE_STEP).ceil() as usize;
-        cuts.extend((0..=steps).map(|k| (r.from + k as f64 * CURVE_STEP).min(r.to)));
+        let steps = ((r.to - r.from) / CURVE_STEP).ceil() as u32;
+        cuts.extend((0..=steps).map(|k| (r.from + f64::from(k) * CURVE_STEP).min(r.to)));
     }
     if let Some(arcs) = arcs {
-        let steps = (arcs.length / CURVE_STEP).ceil() as usize;
-        cuts.extend((0..steps).map(|k| k as f64 * CURVE_STEP));
+        let steps = (arcs.length / CURVE_STEP).ceil() as u32;
+        cuts.extend((0..steps).map(|k| f64::from(k) * CURVE_STEP));
     }
     cuts.push(0.0);
     cuts.sort_by(f64::total_cmp);
@@ -570,6 +547,48 @@ fn tempo_map(
         }
     }
     TempoMap { points, holds }
+}
+
+fn bar_holds(a: &Analysis, inst: &Instance, leaves: &[usize]) -> Vec<Hold> {
+    let bar = &a.score.bars[inst.bar];
+    let local = |t: Frac| inst.start + ticks(t - bar.layout.lead);
+    let mut holds = Vec::new();
+    for &id in leaves {
+        let leaf = &a.leaves[id];
+        let held = leaf.event().is_some_and(|ev| {
+            ev.marks
+                .iter()
+                .any(|m| matches!(m, TokMark::Fermata { .. }))
+        });
+        if held {
+            holds.push(Hold {
+                from: local(leaf.start),
+                to: local(leaf.end()),
+                stretch: FERMATA_STRETCH,
+            });
+        }
+        if let Some((len, stretch)) = a.pauses.get(&id).and_then(|m| pause_hold(*m)) {
+            let to = local(leaf.end());
+            holds.push(Hold {
+                from: to - len,
+                to,
+                stretch,
+            });
+        }
+    }
+    let barline_fermata = bar
+        .attrs
+        .iter()
+        .any(|at| matches!(at, Attr::Barline { fermata: true, .. }));
+    if barline_fermata {
+        let to = inst.start + ticks(bar.layout.length());
+        holds.push(Hold {
+            from: to - BARLINE_HOLD.0,
+            to,
+            stretch: BARLINE_HOLD.1,
+        });
+    }
+    holds
 }
 
 #[derive(Clone, Copy)]
@@ -1113,12 +1132,6 @@ fn all_cues(a: &Analysis, by_bar: &[Vec<usize>]) -> Vec<Cues> {
 fn cues(a: &Analysis, by_bar: &[Vec<usize>], themes: &[Vec<Vec<i32>>], b: usize) -> Cues {
     let prev = b - 1;
     let bars = &a.score.bars;
-    let volta = |x: usize| {
-        bars[x].attrs.iter().find_map(|at| match at {
-            Attr::Volta { numbers, .. } => Some(numbers.clone()),
-            _ => None,
-        })
-    };
     let ends_section = bars[prev].attrs.iter().any(|at| {
         matches!(
             at,
@@ -1146,7 +1159,7 @@ fn cues(a: &Analysis, by_bar: &[Vec<usize>], themes: &[Vec<Vec<i32>>], b: usize)
         None => top_leaves(a, by_bar, b).first().copied(),
     };
     Cues {
-        section: ends_section || starts_section || volta(prev) != volta(b),
+        section: ends_section || starts_section || volta(&bars[prev]) != volta(&bars[b]),
         rest: last.is_some_and(|l| is_rest(l)) || first.is_some_and(is_rest),
         long: last.is_some_and(|l| !is_rest(l) && l.dur * 2 >= bars[prev].layout.length()),
         tonic: bass_on_tonic(a, by_bar, prev),
@@ -1261,7 +1274,7 @@ fn similar(x: &[Vec<i32>], y: &[Vec<i32>]) -> bool {
     if x.len() != y.len() {
         return false;
     }
-    let same = |p: &Vec<i32>, q: &Vec<i32>| {
+    let same = |p: &[i32], q: &[i32]| {
         let both_rests = p.is_empty() && q.is_empty();
         both_rests || p.iter().any(|m| q.contains(m))
     };
@@ -1293,7 +1306,7 @@ fn bass_on_tonic(a: &Analysis, by_bar: &[Vec<usize>], bar: usize) -> bool {
         .map(|&id| &a.leaves[id])
         .filter(|l| l.lane.staff() == Some(Staff::Lower))
         .filter(|l| l.end() > last_cell)
-        .flat_map(|l| l.event().map(|ev| ev.notes()).unwrap_or_default())
+        .flat_map(|l| l.event().map(Event::notes).unwrap_or_default())
         .map(|n| n.pitch.midi())
         .min();
     let key = a.bars[bar].key;
@@ -1322,8 +1335,9 @@ fn slurred_leaves(a: &Analysis) -> HashSet<usize> {
     out
 }
 
-fn gate(marks: &[TokMark], legato: bool) -> Gate {
+fn gate(marks: &[TokMark], touch: Touch) -> Gate {
     let has = |art| marks.contains(&TokMark::Art(art));
+    let legato = touch == Touch::Legato;
     let mezzo = has(Articulation::Tenuto) || legato;
     if has(Articulation::Staccato) && mezzo {
         Gate::Portato
@@ -1340,8 +1354,10 @@ fn gate(marks: &[TokMark], legato: bool) -> Gate {
 
 fn neighbor(p: Pitch, dir: i8, alter: Option<i8>, a: &Analysis, bar: usize) -> i32 {
     let step = i16::from(p.step) + i16::from(dir);
-    let octave = p.octave + step.div_euclid(7) as i8;
-    let step = step.rem_euclid(7) as u8;
+    let octaves = step.div_euclid(7);
+    let octave =
+        p.octave + i8::try_from(octaves).expect("a step from 0..7 moves at most one octave");
+    let step = u8::try_from(step.rem_euclid(7)).expect("rem_euclid(7) is in 0..7");
     let alter = alter.unwrap_or_else(|| key_alter(a.bars[bar].key, step));
     Pitch {
         step,
@@ -1374,13 +1390,20 @@ struct Slot {
     downbeat: bool,
 }
 
+// Notes under a slur, and grace notes, play legato.
+#[derive(Clone, Copy, PartialEq)]
+enum Touch {
+    Legato,
+    Plain,
+}
+
 fn raw_note(
     a: &Analysis,
     r: NoteRef,
     n: &Note,
     marks: &[TokMark],
     slot: &Slot,
-    legato: bool,
+    touch: Touch,
 ) -> Option<Raw> {
     if a.muted(r) {
         return None;
@@ -1404,7 +1427,7 @@ fn raw_note(
             PitchMark::Release(v) => Some(*v),
             _ => None,
         }),
-        gate: gate(marks, legato),
+        gate: gate(marks, touch),
         figure: if main {
             figure(marks, n.pitch, a, leaf.bar)
         } else {
@@ -1430,7 +1453,7 @@ fn leaf_notes(
     id: usize,
     on: f64,
     tempo: &TempoMap,
-    legato: bool,
+    touch: Touch,
     out: &mut Vec<Raw>,
 ) {
     let leaf = &a.leaves[id];
@@ -1473,7 +1496,7 @@ fn leaf_notes(
                     part: Part::Grace(gi),
                     note: ni,
                 };
-                out.extend(raw_note(a, r, note, &gn.marks, &slot, true));
+                out.extend(raw_note(a, r, note, &gn.marks, &slot, Touch::Legato));
             }
         }
         if appoggiatura {
@@ -1498,7 +1521,7 @@ fn leaf_notes(
             part: Part::Main,
             note: ni,
         };
-        let Some(mut raw) = raw_note(a, r, note, &ev.marks, &main, legato) else {
+        let Some(mut raw) = raw_note(a, r, note, &ev.marks, &main, touch) else {
             continue;
         };
         let ornament = matches!(raw.figure, Some(Figure::Ornament { .. }));
@@ -1520,7 +1543,7 @@ fn leaf_notes(
                     part: Part::After(gi),
                     note: ni,
                 };
-                out.extend(raw_note(a, r, note, &gn.marks, &slot, true));
+                out.extend(raw_note(a, r, note, &gn.marks, &slot, Touch::Legato));
             }
         }
     }
@@ -1538,15 +1561,15 @@ fn two_note_tremolo(a: &Analysis, first: usize, last: usize, on: f64, out: &mut 
         })
         .unwrap_or(1);
     let step = stroke_len(strokes).min(total / 2.0);
-    let count = (total / step).round().max(2.0) as usize;
-    let step = total / count as f64;
+    let count = (total / step).round().max(2.0) as u32;
+    let step = total / f64::from(count);
     for k in 0..count {
         let id = if k % 2 == 0 { first } else { last };
         let Some(ev) = a.leaves[id].event() else {
             continue;
         };
         let slot = Slot {
-            on: on + k as f64 * step,
+            on: on + f64::from(k) * step,
             len: step,
             downbeat: k == 0,
         };
@@ -1556,7 +1579,7 @@ fn two_note_tremolo(a: &Analysis, first: usize, last: usize, on: f64, out: &mut 
                 part: Part::Main,
                 note: ni,
             };
-            if let Some(mut raw) = raw_note(a, r, note, &ev.marks, &slot, false) {
+            if let Some(mut raw) = raw_note(a, r, note, &ev.marks, &slot, Touch::Plain) {
                 raw.tied = false;
                 raw.figure = None;
                 out.push(raw);
@@ -1611,8 +1634,8 @@ fn play_figure(r: Raw, tempo: &TempoMap) -> Vec<Raw> {
     let parts: Vec<(i32, f64)> = match fig {
         Figure::Tremolo(strokes) => {
             let step = stroke_len(strokes).min(len);
-            let n = (len / step).round().max(1.0) as usize;
-            vec![(main, len / n as f64); n]
+            let n = (len / step).round().max(1.0);
+            vec![(main, len / n); n as usize]
         }
         Figure::Ornament { kind, upper, lower } => {
             let f = fast.min(len / 4.0);
@@ -1624,10 +1647,10 @@ fn play_figure(r: Raw, tempo: &TempoMap) -> Vec<Raw> {
             match kind {
                 OrnamentKind::Trill | OrnamentKind::TrillLine => {
                     // An odd count ends the trill on the main note.
-                    let n = ((len / fast).round() as usize).max(3);
+                    let n = ((len / fast).round() as u32).max(3);
                     let n = if n % 2 == 0 { n - 1 } else { n };
                     (0..n)
-                        .map(|i| (if i % 2 == 0 { main } else { upper }, len / n as f64))
+                        .map(|i| (if i % 2 == 0 { main } else { upper }, len / f64::from(n)))
                         .collect()
                 }
                 OrnamentKind::Mordent => quick(&[main, lower]),
@@ -1725,7 +1748,7 @@ fn timed(raw: Vec<Raw>, tempo: &TempoMap, humanize: Humanize) -> (Vec<Played>, f
             Played {
                 on: n.on.max(0.0),
                 off: n.off.max(n.on + shortest),
-                key: n.raw.key.clamp(0, 127) as u8,
+                key: u8::try_from(n.raw.key.clamp(0, 127)).expect("clamped to 0..=127"),
                 velocity: n.vel.round().clamp(1.0, 127.0) as u8,
                 staff: Analysis::home_staff(n.raw.lane),
             }
@@ -1759,7 +1782,7 @@ impl Rng {
 // stress the downbeat a little and connect legato notes.
 fn humanize_notes(notes: &mut [Timed], tempo: &TempoMap, seed: u64) {
     let mut rng = Rng(seed);
-    let mut chords: HashMap<(Staff, i64), Vec<usize>> = HashMap::new();
+    let mut chords: BTreeMap<(Staff, i64), Vec<usize>> = BTreeMap::new();
     for (i, n) in notes.iter().enumerate() {
         let staff = Analysis::home_staff(n.raw.lane);
         chords
@@ -1767,10 +1790,7 @@ fn humanize_notes(notes: &mut [Timed], tempo: &TempoMap, seed: u64) {
             .or_default()
             .push(i);
     }
-    let mut keys: Vec<(Staff, i64)> = chords.keys().copied().collect();
-    keys.sort();
-    for key in keys {
-        let ids = &chords[&key];
+    for ids in chords.values() {
         let at = notes[ids[0]].raw.on;
         let ms = |v: f64| tempo.ticks(at, v);
         let shift = ms(rng.normal(6.0, 18.0));
@@ -1788,7 +1808,7 @@ fn humanize_notes(notes: &mut [Timed], tempo: &TempoMap, seed: u64) {
             n.vel += loud + stress + rng.normal(1.5, 4.0);
         }
     }
-    let mut onsets: HashMap<i64, Vec<usize>> = HashMap::new();
+    let mut onsets: BTreeMap<i64, Vec<usize>> = BTreeMap::new();
     for (i, n) in notes.iter().enumerate() {
         onsets.entry(n.raw.on.round() as i64).or_default().push(i);
     }
@@ -1807,7 +1827,7 @@ fn humanize_notes(notes: &mut [Timed], tempo: &TempoMap, seed: u64) {
 }
 
 fn spread_arpeggios(notes: &mut [Timed], tempo: &TempoMap) {
-    let mut groups: HashMap<(i64, usize), Vec<usize>> = HashMap::new();
+    let mut groups: BTreeMap<(i64, usize), Vec<usize>> = BTreeMap::new();
     for (i, n) in notes.iter().enumerate() {
         let Some((_, g)) = n.raw.arp else { continue };
         let id = match g {
@@ -1830,9 +1850,8 @@ fn spread_arpeggios(notes: &mut [Timed], tempo: &TempoMap) {
         }
         // The roll ends on the beat.
         let step = tempo.ticks(notes[ids[0]].raw.on, ARPEGGIO_MS);
-        let last = (ids.len() - 1) as f64;
-        for (k, &i) in ids.iter().enumerate() {
-            notes[i].on -= (last - k as f64) * step;
+        for (&i, notes_after) in ids.iter().rev().zip(0u32..) {
+            notes[i].on -= f64::from(notes_after) * step;
         }
     }
 }
@@ -1935,7 +1954,9 @@ fn channel_settings(score: &Score) -> (u8, Option<u8>, Option<u8>) {
     for attr in &score.header {
         match attr {
             // MusicXML numbers the programs from 1, MIDI from 0.
-            Attr::Program(p) => program = p.saturating_sub(1).min(127) as u8,
+            Attr::Program(p) => {
+                program = u8::try_from(p.saturating_sub(1).min(127)).expect("clamped to 0..=127");
+            }
             // MusicXML: volume 0 to 100, pan -90 (left) to 90 (right).
             Attr::Volume(v) => volume = Some((v * 127.0 / 100.0).round().clamp(0.0, 127.0) as u8),
             Attr::Pan(v) => pan = Some((64.0 + v * 63.0 / 90.0).round().clamp(0.0, 127.0) as u8),

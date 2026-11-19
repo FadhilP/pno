@@ -65,16 +65,20 @@ pub fn temp_path(ext: &str) -> PathBuf {
     std::env::temp_dir().join(format!("pno-{}.{ext}", std::process::id()))
 }
 
-// MuseScore reports success when it cannot replace a file that another program has open, so
-// the old files go first: a file that is still there after the run is new.
-fn remove_old(output: &Path) -> Result<(), String> {
+// MuseScore writes `name-1.png`, `name-2.png` for a PNG or SVG of more than one page.
+fn pages(output: &Path) -> impl Iterator<Item = PathBuf> + '_ {
     let stem = output.file_stem().and_then(|s| s.to_str()).unwrap_or("out");
     let ext = output.extension().and_then(|s| s.to_str()).unwrap_or("");
     let dir = output.parent().unwrap_or(Path::new("."));
-    let pages = (1..)
-        .map(|n| dir.join(format!("{stem}-{n}.{ext}")))
-        .take_while(|p| p.is_file());
-    for old in std::iter::once(output.to_path_buf()).chain(pages) {
+    (1..)
+        .map(move |n| dir.join(format!("{stem}-{n}.{ext}")))
+        .take_while(|p| p.is_file())
+}
+
+// MuseScore reports success when it cannot replace a file that another program has open, so
+// the old files go first: a file that is still there after the run is new.
+fn remove_old(output: &Path) -> Result<(), String> {
+    for old in std::iter::once(output.to_path_buf()).chain(pages(output)) {
         match std::fs::remove_file(&old) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -89,7 +93,6 @@ fn remove_old(output: &Path) -> Result<(), String> {
     Ok(())
 }
 
-// MuseScore writes `name-1.png`, `name-2.png` for a PNG or SVG of more than one page.
 pub fn convert(input: &Path, output: &Path, args: &[&str]) -> Result<Vec<PathBuf>, String> {
     let ms = musescore()?;
     remove_old(output)?;
@@ -111,13 +114,7 @@ pub fn convert(input: &Path, output: &Path, args: &[&str]) -> Result<Vec<PathBuf
     if output.is_file() {
         return Ok(vec![output.to_path_buf()]);
     }
-    let stem = output.file_stem().and_then(|s| s.to_str()).unwrap_or("out");
-    let ext = output.extension().and_then(|s| s.to_str()).unwrap_or("");
-    let dir = output.parent().unwrap_or(Path::new("."));
-    let pages: Vec<PathBuf> = (1..)
-        .map(|n| dir.join(format!("{stem}-{n}.{ext}")))
-        .take_while(|p| p.is_file())
-        .collect();
+    let pages: Vec<PathBuf> = pages(output).collect();
     match pages.as_slice() {
         [] => Err(format!("MuseScore wrote no file {}", output.display())),
         [one] => {

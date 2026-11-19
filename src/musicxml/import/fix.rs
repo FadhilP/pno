@@ -1,7 +1,7 @@
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use super::build::{Built, TokKey, part_notes, token_parts};
+use super::build::{Built, TokKey, TokSrc, part_notes, token_parts};
 use super::read::{Edge, SrcSlur, stop};
 use super::report::{Report, Row};
 use crate::analysis::{Analysis, NoteRef, Part};
@@ -48,10 +48,6 @@ fn lane_order(events: &BTreeMap<TokKey, &mut Event>) -> BTreeMap<Lane, Vec<TokKe
         v.sort_by_key(|k| (k.bar, k.start));
     }
     out
-}
-
-fn notes_of(ev: &Event, p: Part) -> &[crate::model::Note] {
-    part_notes(ev, p)
 }
 
 fn notes_mut(ev: &mut Event, p: Part) -> Option<&mut Vec<crate::model::Note>> {
@@ -117,9 +113,9 @@ pub fn ties(b: &mut Built, rep: &mut Report) -> Result<(), String> {
         for (si, (key, part)) in slots.iter().enumerate() {
             let Some(src) = b.toks.get(key) else { continue };
             for (p, k) in src.tie_starts.iter().filter(|(p, _)| p == part) {
-                let pitch = notes_of(events[key], *p)[*k].pitch;
+                let pitch = part_notes(events[key], *p)[*k].pitch;
                 let holds = |slot: &Slot| {
-                    notes_of(events[&slot.0], slot.1)
+                    part_notes(events[&slot.0], slot.1)
                         .iter()
                         .position(|n| n.pitch == pitch && n.tied)
                 };
@@ -130,7 +126,7 @@ pub fn ties(b: &mut Built, rep: &mut Report) -> Result<(), String> {
                         continue;
                     }
                     // MuseScore 3 writes no tie stop on the main note of a tied grace note.
-                    let same_pitch = notes_of(events[key], Part::Main)
+                    let same_pitch = part_notes(events[key], Part::Main)
                         .iter()
                         .position(|n| n.pitch == pitch);
                     if let Some(i) = same_pitch {
@@ -166,7 +162,7 @@ pub fn ties(b: &mut Built, rep: &mut Report) -> Result<(), String> {
                     })
                     .flat_map(|(ok, ev)| {
                         token_parts(ev).into_iter().flat_map(move |part| {
-                            notes_of(ev, part)
+                            part_notes(ev, part)
                                 .iter()
                                 .enumerate()
                                 .filter(move |(_, n)| n.pitch == pitch && n.tied)
@@ -185,7 +181,8 @@ pub fn ties(b: &mut Built, rep: &mut Report) -> Result<(), String> {
                     // A `~` names no lane, so a second note of this pitch that ends here is a second start.
                     let second_start = events.iter().any(|(ok, ev)| {
                         let touching = b.toks.get(ok).is_some_and(|t| t.end == end);
-                        let same_pitch = notes_of(ev, Part::Main).iter().any(|n| n.pitch == pitch);
+                        let same_pitch =
+                            part_notes(ev, Part::Main).iter().any(|n| n.pitch == pitch);
                         ok.lane != key.lane && ok.bar == key.bar && touching && same_pitch
                     });
                     if second_start {
@@ -212,12 +209,12 @@ pub fn ties(b: &mut Built, rep: &mut Report) -> Result<(), String> {
                     }
                     let prev = &slots[ti - 1];
                     let between = ti - 1 > si;
-                    let sounds_between = notes_of(events[&prev.0], prev.1)
+                    let sounds_between = part_notes(events[&prev.0], prev.1)
                         .iter()
                         .any(|n| n.pitch == pitch);
                     let prev_starts_tie = b.toks.get(&prev.0).is_some_and(|t| {
                         t.tie_starts.iter().any(|(pp, pk)| {
-                            *pp == prev.1 && notes_of(events[&prev.0], *pp)[*pk].pitch == pitch
+                            *pp == prev.1 && part_notes(events[&prev.0], *pp)[*pk].pitch == pitch
                         })
                     });
                     // The end belongs to the tie of the note before it: this tie has no end.
@@ -241,7 +238,7 @@ pub fn ties(b: &mut Built, rep: &mut Report) -> Result<(), String> {
                         bar => prev_bars[bar] == Some(key.bar),
                     };
                     let has_end = token_parts(ev).into_iter().any(|part| {
-                        notes_of(ev, part)
+                        part_notes(ev, part)
                             .iter()
                             .any(|n| n.pitch == pitch && n.tied)
                     });
@@ -275,7 +272,7 @@ pub fn ties(b: &mut Built, rep: &mut Report) -> Result<(), String> {
             n.tied = true;
         }
     }
-    for (key, ev) in events.iter_mut() {
+    for (key, ev) in &mut events {
         for part in token_parts(ev) {
             if let Some(notes) = notes_mut(ev, part) {
                 for (i, n) in notes.iter_mut().enumerate() {
@@ -294,7 +291,7 @@ pub fn ties(b: &mut Built, rep: &mut Report) -> Result<(), String> {
 struct Pair {
     start: Slot,
     end: Slot,
-    above: Option<bool>,
+    place: Option<Place>,
 }
 
 fn part_rank(p: Part) -> (u8, usize) {
@@ -306,15 +303,58 @@ fn part_rank(p: Part) -> (u8, usize) {
 }
 
 pub fn slurs(b: &mut Built, rep: &mut Report) {
+    let pairs = pair_slurs(&b.toks, rep);
+    let numbers = slur_numbers(&pairs);
+    let mut events = events_mut(&mut b.score);
+    // The outer slur first: unnumbered slurs pair by nesting, and `:su` or `:sd` is its direction.
+    let mut order: Vec<usize> = (0..pairs.len()).collect();
+    order.sort_by_key(|&i| {
+        let end = pairs[i].end;
+        (
+            pairs[i].start,
+            Reverse((end.0.bar, end.0.start, part_rank(end.1))),
+        )
+    });
+    for i in order {
+        let p = &pairs[i];
+        let number = numbers.get(&i).copied();
+        if let Some(ev) = events.get_mut(&p.end.0) {
+            slurs_mut(ev, p.end.1).ends.push(number);
+        }
+        let Some(ev) = events.get_mut(&p.start.0) else {
+            continue;
+        };
+        let starts = &mut slurs_mut(ev, p.start.1).starts;
+        if !starts.is_empty() {
+            starts.push(SlurStart {
+                number,
+                place: p.place,
+            });
+            continue;
+        }
+        starts.push(SlurStart {
+            number,
+            place: None,
+        });
+        let mark = match p.place {
+            Some(Place::Above) => Some(TokMark::SlurUp),
+            Some(Place::Below) => Some(TokMark::SlurDown),
+            None => None,
+        };
+        marks_mut(ev, p.start.1).extend(mark);
+    }
+}
+
+fn pair_slurs(toks: &BTreeMap<TokKey, TokSrc>, rep: &mut Report) -> Vec<Pair> {
     let mut marks: Vec<(Slot, SrcSlur)> = Vec::new();
-    for (key, src) in &b.toks {
+    for (key, src) in toks {
         for (p, s) in &src.slurs {
             marks.push(((*key, *p), *s));
         }
     }
     // Document order; on one note a stop comes before a start: `)(`.
     marks.sort_by_key(|(_, s)| (s.note, s.edge == Edge::Start));
-    let mut open: HashMap<u32, Vec<(Slot, Option<bool>)>> = HashMap::new();
+    let mut open: HashMap<u32, Vec<(Slot, Option<Place>)>> = HashMap::new();
     // MuseScore writes a measure voice by voice, so the stop of a slur from a later voice can come
     // first: such a stop waits for a start of its number earlier in its measure.
     let mut early_stops: HashMap<u32, Vec<Slot>> = HashMap::new();
@@ -333,17 +373,17 @@ pub fn slurs(b: &mut Built, rep: &mut Report) {
                     Some(end) => pairs.push(Pair {
                         start: *slot,
                         end,
-                        above: s.above,
+                        place: s.place,
                     }),
-                    None => open.entry(s.number).or_default().push((*slot, s.above)),
+                    None => open.entry(s.number).or_default().push((*slot, s.place)),
                 }
             }
             Edge::Stop => match open.get_mut(&s.number).and_then(Vec::pop) {
                 Some((start, _)) if start == *slot => broken += 1,
-                Some((start, above)) => pairs.push(Pair {
+                Some((start, place)) => pairs.push(Pair {
                     start,
                     end: *slot,
-                    above,
+                    place,
                 }),
                 None => early_stops.entry(s.number).or_default().push(*slot),
             },
@@ -352,6 +392,10 @@ pub fn slurs(b: &mut Built, rep: &mut Report) {
     broken += open.values().map(Vec::len).sum::<usize>();
     broken += early_stops.values().map(Vec::len).sum::<usize>();
     rep.drop_n(Row::BrokenSlurs, broken);
+    pairs
+}
+
+fn slur_numbers(pairs: &[Pair]) -> HashMap<usize, u32> {
     let mut numbered = vec![false; pairs.len()];
     let mut lanes: BTreeMap<Lane, Vec<(Slot, usize, Edge)>> = BTreeMap::new();
     for (i, p) in pairs.iter().enumerate() {
@@ -406,7 +450,9 @@ pub fn slurs(b: &mut Built, rep: &mut Report) {
     for (_, i, edge) in &timeline {
         match edge {
             Edge::Start => {
-                let n = (1..).find(|n| !in_use.contains(n)).unwrap_or(1);
+                let n = (1..=u32::MAX)
+                    .find(|n| !in_use.contains(n))
+                    .expect("fewer than u32::MAX slurs are open at once");
                 in_use.insert(n);
                 numbers.insert(*i, n);
             }
@@ -417,44 +463,7 @@ pub fn slurs(b: &mut Built, rep: &mut Report) {
             }
         }
     }
-    let mut events = events_mut(&mut b.score);
-    // The outer slur first: unnumbered slurs pair by nesting, and `:su` or `:sd` is its direction.
-    let mut order: Vec<usize> = (0..pairs.len()).collect();
-    order.sort_by_key(|&i| {
-        let end = pairs[i].end;
-        (
-            pairs[i].start,
-            Reverse((end.0.bar, end.0.start, part_rank(end.1))),
-        )
-    });
-    for i in order {
-        let p = &pairs[i];
-        let number = numbers.get(&i).copied();
-        if let Some(ev) = events.get_mut(&p.end.0) {
-            slurs_mut(ev, p.end.1).ends.push(number);
-        }
-        let Some(ev) = events.get_mut(&p.start.0) else {
-            continue;
-        };
-        let place = p
-            .above
-            .map(|up| if up { Place::Above } else { Place::Below });
-        let starts = &mut slurs_mut(ev, p.start.1).starts;
-        if !starts.is_empty() {
-            starts.push(SlurStart { number, place });
-            continue;
-        }
-        starts.push(SlurStart {
-            number,
-            place: None,
-        });
-        let mark = match place {
-            Some(Place::Above) => Some(TokMark::SlurUp),
-            Some(Place::Below) => Some(TokMark::SlurDown),
-            None => None,
-        };
-        marks_mut(ev, p.start.1).extend(mark);
-    }
+    numbers
 }
 
 fn parse_vel_line(line: &str) -> Option<(Option<String>, Attr)> {
@@ -519,79 +528,13 @@ fn round2(v: f64) -> f64 {
     (v * 100.0).round() / 100.0
 }
 
-pub fn note_velocities(b: &mut Built, lane_rule: bool) {
-    // `None` is a note that does not sound (`v0`).
-    let offsets: Vec<(TokKey, Part, Vec<Option<f64>>)> = {
-        let a = Analysis::new(&b.score);
-        let mut out = Vec::new();
-        for (id, leaf) in a.leaves.iter().enumerate() {
-            let Some(ev) = leaf.event() else { continue };
-            let key = TokKey {
-                bar: leaf.bar,
-                lane: leaf.lane,
-                start: leaf.start,
-            };
-            let Some(src) = b.toks.get(&key) else {
-                continue;
-            };
-            for part in token_parts(ev) {
-                let Some((_, targets)) = src.velocities.iter().find(|(p, _)| *p == part) else {
-                    continue;
-                };
-                let mut offs = Vec::new();
-                for (i, t) in targets.iter().enumerate() {
-                    if *t == 0.0 {
-                        offs.push(None);
-                        continue;
-                    }
-                    let now = a
-                        .velocity(NoteRef {
-                            leaf: id,
-                            part,
-                            note: i,
-                        })
-                        .note;
-                    offs.push(Some(round2(t - now)));
-                }
-                out.push((key, part, offs));
-            }
-        }
-        out
+pub fn note_velocities(b: &mut Built, vel_lines: &[String]) {
+    let offsets = velocity_offsets(b);
+    let lane_offset = if vel_lines.is_empty() {
+        lane_offsets(b, &offsets)
+    } else {
+        BTreeMap::new()
     };
-    let mut lane_offset: BTreeMap<Lane, f64> = BTreeMap::new();
-    if lane_rule {
-        let mut by_lane: BTreeMap<Lane, Vec<f64>> = BTreeMap::new();
-        for (key, _, offs) in &offsets {
-            by_lane
-                .entry(key.lane)
-                .or_default()
-                .extend(offs.iter().flatten());
-        }
-        for (lane, offs) in by_lane {
-            let mut counts: Vec<(f64, usize)> = Vec::new();
-            for o in &offs {
-                match counts.iter_mut().find(|(v, _)| (v - o).abs() < 0.001) {
-                    Some((_, n)) => *n += 1,
-                    None => counts.push((*o, 1)),
-                }
-            }
-            if let Some((v, n)) = counts.into_iter().max_by_key(|(_, n)| *n) {
-                if n * 2 > offs.len() && v.abs() > 0.001 {
-                    lane_offset.insert(lane, v);
-                }
-            }
-        }
-        for (lane, v) in &lane_offset {
-            let first = offsets
-                .iter()
-                .filter(|(k, _, _)| k.lane == *lane)
-                .map(|(k, _, _)| k.bar)
-                .min();
-            if let Some(bar) = first {
-                b.score.bars[bar].attrs.push(Attr::VelLane(*lane, *v));
-            }
-        }
-    }
     let mut events = events_mut(&mut b.score);
     for (key, part, offs) in offsets {
         let shift = lane_offset.get(&key.lane).copied().unwrap_or(0.0);
@@ -625,4 +568,82 @@ pub fn note_velocities(b: &mut Built, lane_rule: bool) {
             }
         }
     }
+}
+
+// `None` is a note that does not sound (`v0`).
+fn velocity_offsets(b: &Built) -> Vec<(TokKey, Part, Vec<Option<f64>>)> {
+    let a = Analysis::new(&b.score);
+    let mut out = Vec::new();
+    for (id, leaf) in a.leaves.iter().enumerate() {
+        let Some(ev) = leaf.event() else { continue };
+        let key = TokKey {
+            bar: leaf.bar,
+            lane: leaf.lane,
+            start: leaf.start,
+        };
+        let Some(src) = b.toks.get(&key) else {
+            continue;
+        };
+        for part in token_parts(ev) {
+            let Some((_, targets)) = src.velocities.iter().find(|(p, _)| *p == part) else {
+                continue;
+            };
+            let mut offs = Vec::new();
+            for (i, t) in targets.iter().enumerate() {
+                if *t == 0.0 {
+                    offs.push(None);
+                    continue;
+                }
+                let now = a
+                    .velocity(NoteRef {
+                        leaf: id,
+                        part,
+                        note: i,
+                    })
+                    .note;
+                offs.push(Some(round2(t - now)));
+            }
+            out.push((key, part, offs));
+        }
+    }
+    out
+}
+
+fn lane_offsets(
+    b: &mut Built,
+    offsets: &[(TokKey, Part, Vec<Option<f64>>)],
+) -> BTreeMap<Lane, f64> {
+    let mut lane_offset: BTreeMap<Lane, f64> = BTreeMap::new();
+    let mut by_lane: BTreeMap<Lane, Vec<f64>> = BTreeMap::new();
+    for (key, _, offs) in offsets {
+        by_lane
+            .entry(key.lane)
+            .or_default()
+            .extend(offs.iter().flatten());
+    }
+    for (lane, offs) in by_lane {
+        let mut counts: Vec<(f64, usize)> = Vec::new();
+        for o in &offs {
+            match counts.iter_mut().find(|(v, _)| (v - o).abs() < 0.001) {
+                Some((_, n)) => *n += 1,
+                None => counts.push((*o, 1)),
+            }
+        }
+        if let Some((v, n)) = counts.into_iter().max_by_key(|(_, n)| *n) {
+            if n * 2 > offs.len() && v.abs() > 0.001 {
+                lane_offset.insert(lane, v);
+            }
+        }
+    }
+    for (lane, v) in &lane_offset {
+        let first = offsets
+            .iter()
+            .filter(|(k, _, _)| k.lane == *lane)
+            .map(|(k, _, _)| k.bar)
+            .min();
+        if let Some(bar) = first {
+            b.score.bars[bar].attrs.push(Attr::VelLane(*lane, *v));
+        }
+    }
+    lane_offset
 }

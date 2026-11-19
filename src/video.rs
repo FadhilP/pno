@@ -214,7 +214,7 @@ fn draw(frame: &mut Frame, scene: &Scene, now: f64) {
         );
         frame.fill(k.x, KEYBOARD_TOP + 3, 1, KEYBOARD_HEIGHT - 3, GAP);
     }
-    let black_height = (KEYBOARD_HEIGHT as f64 * 0.62) as usize;
+    let black_height = (KEYBOARD_HEIGHT as f64 * 0.62).floor() as usize;
     for (k, d) in keys.iter().zip(&down).filter(|(k, _)| k.black) {
         let c = d.map_or(BLACK, |c| shade(c, 0.75));
         frame.fill(k.x, KEYBOARD_TOP + 3, k.width, black_height, c);
@@ -297,8 +297,9 @@ pub fn render(p: &Performance, hands: &Hands, out: &Path) -> Result<(), String> 
     let mut frame = Frame(vec![0; WIDTH * HEIGHT * 3]);
     let written = {
         let stdin = encoder.stdin.as_mut().ok_or("cannot write to ffmpeg")?;
-        (0..((LEAD_IN + end) * FPS).ceil() as usize).try_for_each(|i| {
-            draw(&mut frame, &scene, i as f64 / FPS - LEAD_IN);
+        let frames = ((LEAD_IN + end) * FPS).ceil() as u32;
+        (0..frames).try_for_each(|i| {
+            draw(&mut frame, &scene, f64::from(i) / FPS - LEAD_IN);
             stdin.write_all(&frame.0)
         })
     };
