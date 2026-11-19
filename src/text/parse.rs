@@ -6,6 +6,7 @@ use crate::model::{
 };
 use crate::text::attr::{parse_attr, split_attrs};
 use crate::text::token::{Word, parse_word};
+use crate::text::write::cell_counts;
 
 #[derive(Debug)]
 enum Raw {
@@ -540,13 +541,7 @@ fn cell_count(raw: &[Raw]) -> usize {
 type LayoutError = (Frac, String);
 
 fn valid_slot_count(cell: Frac, n: usize) -> bool {
-    if cell.is_pow2() {
-        return matches!(n, 1 | 2 | 4 | 8 | 16 | 32);
-    }
-    if (cell / 3).is_pow2() {
-        return matches!(n, 1 | 3 | 6 | 12 | 24);
-    }
-    n == 1
+    cell_counts(cell).contains(&(n as i64))
 }
 
 fn layout_line(lane: Lane, raw: &[Raw], cells: &[Frac]) -> Result<Vec<El>, LayoutError> {
@@ -589,9 +584,9 @@ fn layout_line(lane: Lane, raw: &[Raw], cells: &[Frac]) -> Result<Vec<El>, Layou
         let cell = cells[ci];
         if !valid_slot_count(cell, chunk.len()) {
             let counts = if cell.is_pow2() {
-                "1, 2, 4, 8, 16 or 32"
+                "1, 2, 4, 8, 16, 32 or 64"
             } else {
-                "1, 3, 6, 12 or 24"
+                "1, 3, 6, 12, 24 or 48"
             };
             return Err((
                 at,
@@ -734,7 +729,12 @@ fn extend(
     let ok = match &mut last.kind {
         ElKind::Group(..) => Ok(()),
         ElKind::Tok(tok) => match tok {
-            Tok::Event(_) | Tok::Cont | Tok::Pedal(_) | Tok::Hairpin(..) | Tok::Ottava(_) => Ok(()),
+            Tok::Event(_)
+            | Tok::Cont
+            | Tok::Pedal(_)
+            | Tok::Hairpin(..)
+            | Tok::Ottava(_)
+            | Tok::Trill => Ok(()),
             Tok::Text(t) => {
                 t.ext = true;
                 Ok(())

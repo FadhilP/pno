@@ -69,7 +69,10 @@ fn sound_velocity_shows_the_midi_velocity_of_each_new_note() {
 ";
     let f = write(&dir, "v.pno", text);
     let out = run_ok(&["sound", path(&f), "--velocity"]);
-    assert!(out.contains("\n1 1      lh C3@78 | rh C5@68 E5@48\n"), "{out}");
+    assert!(
+        out.contains("\n1 1      lh C3@78 | rh C5@68 E5@48\n"),
+        "{out}"
+    );
     assert!(out.contains("\n1 3      lh C3~ | rh G5@68\n"), "{out}");
     let mid = dir.join("v.mid");
     run_ok(&["export", path(&f), path(&mid)]);

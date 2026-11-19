@@ -107,6 +107,7 @@ pub fn ties(b: &mut Built, rep: &mut Report) -> Result<(), String> {
     let order = lane_order(&events);
     let mut matched: BTreeSet<(TokKey, Part, usize)> = BTreeSet::new();
     let mut later: Vec<(TokKey, Part, usize)> = Vec::new();
+    let mut grace_ends: Vec<(TokKey, usize)> = Vec::new();
     let mut broken = 0;
     for keys in order.values() {
         let slots: Vec<Slot> = keys
@@ -128,6 +129,15 @@ pub fn ties(b: &mut Built, rep: &mut Report) -> Result<(), String> {
                         matched.insert((own_main.0, own_main.1, i));
                         continue;
                     }
+                    // MuseScore 3 writes no tie stop on the main note of a tied grace note.
+                    let same_pitch = notes_of(events[key], Part::Main)
+                        .iter()
+                        .position(|n| n.pitch == pitch);
+                    if let Some(i) = same_pitch {
+                        matched.insert((own_main.0, own_main.1, i));
+                        grace_ends.push((*key, i));
+                        continue;
+                    }
                 }
                 let touches = |slot: &Slot| {
                     let at = slot.0;
@@ -144,24 +154,33 @@ pub fn ties(b: &mut Built, rep: &mut Report) -> Result<(), String> {
                     }
                 }
                 let end = src.end;
-                let other = events.iter().find_map(|(ok, ev)| {
-                    let same_time = ok.lane != key.lane && ok.start == end && ok.bar == key.bar;
-                    let next_bar = ok.lane != key.lane
-                        && ok.bar == key.bar + 1
-                        && end == bounds[key.bar].1
-                        && ok.start == bounds[ok.bar].0;
-                    if !(same_time || next_bar) {
-                        return None;
-                    }
-                    let first = token_parts(ev)[0];
-                    notes_of(ev, first)
-                        .iter()
-                        .enumerate()
-                        .find(|(i, n)| {
-                            n.pitch == pitch && n.tied && !matched.contains(&(*ok, first, *i))
+                let other_ends: Vec<(TokKey, Part, usize)> = events
+                    .iter()
+                    .filter(|(ok, _)| {
+                        let same_time = ok.lane != key.lane && ok.start == end && ok.bar == key.bar;
+                        let next_bar = ok.lane != key.lane
+                            && ok.bar == key.bar + 1
+                            && end == bounds[key.bar].1
+                            && ok.start == bounds[ok.bar].0;
+                        same_time || next_bar
+                    })
+                    .flat_map(|(ok, ev)| {
+                        token_parts(ev).into_iter().flat_map(move |part| {
+                            notes_of(ev, part)
+                                .iter()
+                                .enumerate()
+                                .filter(move |(_, n)| n.pitch == pitch && n.tied)
+                                .map(move |(i, _)| (*ok, part, i))
                         })
-                        .map(|(i, _)| (*ok, first, i))
-                });
+                    })
+                    .collect();
+                let other = other_ends.iter().copied().find(|m| !matched.contains(m));
+                if other.is_none() && !other_ends.is_empty() {
+                    return Err(stop(
+                        "a tie into another voice with two possible start notes",
+                        &b.numbers[key.bar],
+                    ));
+                }
                 if let Some(m) = other {
                     // A `~` names no lane, so a second note of this pitch that ends here is a second start.
                     let second_start = events.iter().any(|(ok, ev)| {
@@ -185,11 +204,27 @@ pub fn ties(b: &mut Built, rep: &mut Report) -> Result<(), String> {
                     .filter(|(_, s)| main_only(s))
                     .find_map(|(off, s)| holds(s).map(|i| (si + 1 + off, *s, i)));
                 if let Some((ti, slot, i)) = target {
+                    // Over the grace notes of its own end note a tie is a plain `~`.
+                    let own_graces = ti > si + 1 && slots[si + 1..ti].iter().all(|s| s.0 == slot.0);
+                    if own_graces && touches(&slot) {
+                        matched.insert((slot.0, slot.1, i));
+                        continue;
+                    }
                     let prev = &slots[ti - 1];
                     let between = ti - 1 > si;
                     let sounds_between = notes_of(events[&prev.0], prev.1)
                         .iter()
                         .any(|n| n.pitch == pitch);
+                    let prev_starts_tie = b.toks.get(&prev.0).is_some_and(|t| {
+                        t.tie_starts.iter().any(|(pp, pk)| {
+                            *pp == prev.1 && notes_of(events[&prev.0], *pp)[*pk].pitch == pitch
+                        })
+                    });
+                    // The end belongs to the tie of the note before it: this tie has no end.
+                    if between && prev_starts_tie {
+                        broken += 1;
+                        continue;
+                    }
                     if between && sounds_between {
                         return Err(stop(
                             "a tie with notes of the same pitch between its ends",
@@ -229,6 +264,15 @@ pub fn ties(b: &mut Built, rep: &mut Report) -> Result<(), String> {
             .and_then(|n| n.get_mut(k))
         {
             n.marks.push(PitchMark::TieLater);
+        }
+    }
+    for (key, i) in grace_ends {
+        if let Some(n) = events
+            .get_mut(&key)
+            .and_then(|e| notes_mut(e, Part::Main))
+            .and_then(|n| n.get_mut(i))
+        {
+            n.tied = true;
         }
     }
     for (key, ev) in events.iter_mut() {
@@ -271,11 +315,29 @@ pub fn slurs(b: &mut Built, rep: &mut Report) {
     // Document order; on one note a stop comes before a start: `)(`.
     marks.sort_by_key(|(_, s)| (s.note, s.edge == Edge::Start));
     let mut open: HashMap<u32, Vec<(Slot, Option<bool>)>> = HashMap::new();
+    // MuseScore writes a measure voice by voice, so the stop of a slur from a later voice can come
+    // first: such a stop waits for a start of its number earlier in its measure.
+    let mut early_stops: HashMap<u32, Vec<Slot>> = HashMap::new();
     let mut pairs: Vec<Pair> = Vec::new();
     let mut broken = 0;
     for (slot, s) in &marks {
         match s.edge {
-            Edge::Start => open.entry(s.number).or_default().push((*slot, s.above)),
+            Edge::Start => {
+                let waiting = early_stops.get_mut(&s.number).and_then(|stops| {
+                    let at = stops
+                        .iter()
+                        .position(|end| end.0.bar == slot.0.bar && end.0.start > slot.0.start)?;
+                    Some(stops.remove(at))
+                });
+                match waiting {
+                    Some(end) => pairs.push(Pair {
+                        start: *slot,
+                        end,
+                        above: s.above,
+                    }),
+                    None => open.entry(s.number).or_default().push((*slot, s.above)),
+                }
+            }
             Edge::Stop => match open.get_mut(&s.number).and_then(Vec::pop) {
                 Some((start, _)) if start == *slot => broken += 1,
                 Some((start, above)) => pairs.push(Pair {
@@ -283,11 +345,12 @@ pub fn slurs(b: &mut Built, rep: &mut Report) {
                     end: *slot,
                     above,
                 }),
-                None => broken += 1,
+                None => early_stops.entry(s.number).or_default().push(*slot),
             },
         }
     }
     broken += open.values().map(Vec::len).sum::<usize>();
+    broken += early_stops.values().map(Vec::len).sum::<usize>();
     rep.drop_n(Row::BrokenSlurs, broken);
     let mut numbered = vec![false; pairs.len()];
     let mut lanes: BTreeMap<Lane, Vec<(Slot, usize, Edge)>> = BTreeMap::new();

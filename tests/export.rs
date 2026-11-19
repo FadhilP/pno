@@ -212,3 +212,38 @@ fn velocity_lines_go_to_the_miscellaneous_block() {
         "no attribute at the mark level"
     );
 }
+
+#[test]
+fn an_empty_run_that_is_no_note_value_in_a_tuplet_survives_export_and_import() {
+    // Bach BWV 874 bar 40: five empty eighths in an 8:12 group.
+    let cells = "| 8:12h[C5 _ | _ _ | _ _ | r -] |";
+    let dir = temp_dir("export-empty-run");
+    let src = write(
+        &dir,
+        "e.pno",
+        &format!("@ format=1\n@ time=12/8\n\n1 rh {cells}\n1 lh | R |\n"),
+    );
+    let xml = dir.join("e.musicxml");
+    let run = pno(&["export", path(&src), path(&xml)]);
+    assert_eq!(run.code, 0, "{}{}", run.stdout, run.stderr);
+    let back = dir.join("back.pno");
+    let run = pno(&["import", path(&xml), "-o", path(&back)]);
+    assert_eq!(run.code, 0, "{}{}", run.stdout, run.stderr);
+    let text = std::fs::read_to_string(back).expect("import is readable");
+    assert!(text.contains(cells), "{text}");
+}
+
+#[test]
+fn a_mark_of_a_second_dynamics_lane_goes_before_the_level_mark_at_its_time() {
+    // MusicXML readers keep the level of the last mark at a time: `f` must come after `fp`.
+    let dir = temp_dir("export-dyn-order");
+    let src = write(
+        &dir,
+        "d.pno",
+        "@ format=1\n@ time=2/4\n\n1 rh.dyn  | f | _ |\n1 rh.dyn2 | fp | _ |\n1 rh | C5 | D5 |\n1 lh | R |\n",
+    );
+    let xml = export(&src, "dyn-order");
+    let fp = xml.find("<fp/>").expect("an fp mark");
+    let f = xml.find("<f/>").expect("an f mark");
+    assert!(fp < f, "{xml}");
+}

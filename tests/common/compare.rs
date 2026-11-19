@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use roxmltree::{Document, Node, NodeId, ParsingOptions};
 
@@ -22,8 +22,18 @@ pub fn parse(xml: &str) -> Document<'_> {
 }
 
 // Section 4.1: coordinates and sizes, and the font style of text.
-const DROPPED_ATTRS: [&str; 13] = [
+const DROPPED_ATTRS: [&str; 23] = [
     "color",
+    "end-length",
+    "text-x",
+    "text-y",
+    "spread",
+    "bezier-x",
+    "bezier-y",
+    "bezier-x2",
+    "bezier-y2",
+    "bezier-offset",
+    "bezier-offset2",
     "default-x",
     "default-y",
     "relative-x",
@@ -188,7 +198,12 @@ fn note_times(m: Node, div: i64) -> HashMap<NodeId, (Q, Q)> {
 fn is_default(tag: &str, name: &str, value: &str) -> bool {
     matches!(
         (tag, name, value),
-        ("strong-accent", "type", "up") | ("tuplet", "number", "1")
+        ("strong-accent", "type", "up")
+            | ("tuplet", "number", "1")
+            | ("clef", "number", "1")
+            | ("metronome", "parentheses", "no")
+            // A clef at the start of a measure is drawn after the barline.
+            | ("clef", "after-barline", "yes")
     )
 }
 
@@ -204,7 +219,7 @@ fn pedal_defaults(n: Node, attrs: &mut Vec<String>) {
     }
 }
 
-// 4.1: a text or tempo with no placement is at the default place of its staff.
+// 4.1: a text, tempo or hairpin with no placement is at its default place.
 fn text_placement(direction: Node) -> Option<String> {
     let marks: Vec<&str> = direction
         .children()
@@ -215,6 +230,8 @@ fn text_placement(direction: Node) -> Option<String> {
     let lower = text(direction, "staff") == "2";
     let place = if marks.contains(&"metronome") {
         "above"
+    } else if marks == ["wedge"] {
+        "below"
     } else if marks.iter().all(|m| *m == "words") && !marks.is_empty() {
         if lower { "below" } else { "above" }
     } else {
@@ -223,20 +240,11 @@ fn text_placement(direction: Node) -> Option<String> {
     Some(format!("placement={place}"))
 }
 
-// MusicXML: a `normal-type` equal to the type of the note is the default.
-fn unit_is_note_type(time_mod: Node) -> bool {
-    let Some(note) = time_mod.parent() else {
-        return false;
-    };
-    let dots = |n: Node, tag: &str| n.children().filter(|c| c.has_tag_name(tag)).count();
-    text(time_mod, "normal-type") == text(note, "type")
-        && dots(time_mod, "normal-dot") == dots(note, "dot")
-}
-
 struct Rules {
     detail: Detail,
     span_ends: HashMap<NodeId, String>,
     pedal_types: HashMap<NodeId, &'static str>,
+    grace_slash: HashMap<NodeId, bool>,
 }
 
 fn divisions(m: Node) -> Option<i64> {
@@ -250,6 +258,7 @@ struct Timed<'a> {
     order: usize,
     measure: usize,
     start: Q,
+    len: Q,
     node: Node<'a, 'a>,
 }
 
@@ -265,7 +274,7 @@ fn timed<'a>(doc: &'a Document) -> Vec<Timed<'a>> {
         let times = note_times(m, div);
         let (mut pos, mut last) = (0i64, 0i64);
         for e in m.children().filter(Node::is_element) {
-            let start = match e.tag_name().name() {
+            let (start, len) = match e.tag_name().name() {
                 "backup" => {
                     pos -= int(e, "duration");
                     continue;
@@ -281,15 +290,19 @@ fn timed<'a>(doc: &'a Document) -> Vec<Timed<'a>> {
                         last = int(e, "duration");
                         pos += last;
                     }
-                    times.get(&e.id()).map_or(q(start, div * 4), |t| t.0)
+                    times
+                        .get(&e.id())
+                        .copied()
+                        .unwrap_or((q(start, div * 4), (0, 1)))
                 }
-                "direction" => q(pos + int(e, "offset"), div * 4),
+                "direction" => (q(pos + int(e, "offset"), div * 4), (0, 1)),
                 _ => continue,
             };
             out.push(Timed {
                 order: out.len(),
                 measure,
                 start,
+                len,
                 node: e,
             });
         }
@@ -301,15 +314,31 @@ struct SpanMark<'a> {
     // As MusicXML readers: document order; on one note a stop before a start.
     order: (usize, bool),
     place: String,
+    at: (usize, Q),
     node: Node<'a, 'a>,
 }
 
-const SPANS: [&str; 4] = ["slur", "wedge", "dashes", "octave-shift"];
+const SPANS: [&str; 7] = [
+    "slur",
+    "wedge",
+    "dashes",
+    "octave-shift",
+    "glissando",
+    "slide",
+    "wavy-line",
+];
 
 // Span numbers are labels that the import may change: each end is named by the place of the other end.
 fn span_ends(doc: &Document) -> HashMap<NodeId, String> {
     let mut marks: Vec<SpanMark> = Vec::new();
-    for t in timed(doc) {
+    let all = timed(doc);
+    let last = all.iter().map(|t| t.measure).max().unwrap_or(0);
+    let score_end = all
+        .iter()
+        .filter(|t| t.measure == last)
+        .map(|t| q_add(t.start, t.len))
+        .fold((0, 1), |a, b| if a.0 * b.1 < b.0 * a.1 { b } else { a });
+    for t in all {
         let place = format!("{}@{}", t.measure, q_text(t.start));
         for s in t
             .node
@@ -319,29 +348,66 @@ fn span_ends(doc: &Document) -> HashMap<NodeId, String> {
             let Some(kind) = s.attribute("type").filter(|t| *t != "continue") else {
                 continue;
             };
+            // A trill line ends where the note with its stop ends, on any voice of the staff.
+            let trill_end = kind == "stop" && s.has_tag_name("wavy-line");
+            let place = if trill_end {
+                format!("{}@{}", t.measure, q_text(q_add(t.start, t.len)))
+            } else {
+                place.clone()
+            };
             marks.push(SpanMark {
                 order: (t.order, kind != "stop"),
-                place: place.clone(),
+                place,
+                at: (t.measure, t.start),
                 node: s,
             });
         }
     }
     marks.sort_by_key(|m| m.order);
-    // A stop closes the last open span of its type and number.
+    // A stop closes the last open span of its type and number. As the import: a slur stop with no
+    // open start waits for a start of its number earlier in its measure.
     let mut open: HashMap<(&str, &str), Vec<(String, NodeId)>> = HashMap::new();
+    type EarlyStop = (String, (usize, Q), NodeId);
+    let mut early_stops: HashMap<(&str, &str), Vec<EarlyStop>> = HashMap::new();
     let mut ends = HashMap::new();
+    let before = |a: (usize, Q), b: (usize, Q)| a.0 == b.0 && a.1.0 * b.1.1 < b.1.0 * a.1.1;
     for SpanMark {
         order: (_, is_start),
         place,
+        at,
         node: s,
     } in marks
     {
         let key = (s.tag_name().name(), s.attribute("number").unwrap_or("1"));
         if is_start {
-            open.entry(key).or_default().push((place, s.id()));
+            let waiting = early_stops.get_mut(&key).and_then(|stops| {
+                let i = stops.iter().position(|(_, end, _)| before(at, *end))?;
+                Some(stops.remove(i))
+            });
+            match waiting {
+                Some((to, _, id)) => {
+                    ends.insert(s.id(), format!("to={to}"));
+                    ends.insert(id, format!("from={place}"));
+                }
+                None => open.entry(key).or_default().push((place, s.id())),
+            }
         } else if let Some((from, id)) = open.get_mut(&key).and_then(Vec::pop) {
             ends.insert(id, format!("to={place}"));
             ends.insert(s.id(), format!("from={from}"));
+        } else if key.0 == "slur" {
+            early_stops
+                .entry(key)
+                .or_default()
+                .push((place, at, s.id()));
+        }
+    }
+    // As the import: a hairpin, dashed line or ottava with no end ends at the end of the score.
+    let end_place = format!("{last}@{}", q_text(score_end));
+    for ((tag, _), starts) in open {
+        if matches!(tag, "wedge" | "dashes" | "octave-shift") {
+            for (_, id) in starts {
+                ends.insert(id, format!("to={end_place}"));
+            }
         }
     }
     ends
@@ -395,11 +461,15 @@ impl Rules {
         match (parent, tag) {
             // The size of a note is compared as `small` of its chord.
             ("note", "voice" | "duration" | "cue") => true,
+            // 4.1: page setup and engraving style (the naturals that cancel the key before).
+            ("key", "cancel") => true,
             _ if presentation => self.detail == Detail::NoStemsBeams,
             // 4.1: the vertical position of rests.
             ("rest", "display-step" | "display-octave") => true,
             // 4.1: the voice numbers of the source; the offset is in the time.
             ("direction", "voice" | "offset") => true,
+            // 4.1: the unit note value of a tuplet; the lengths of its notes are compared.
+            ("time-modification", "normal-type" | "normal-dot") => true,
             // 4.1: text lines with a bracket.
             ("direction-type", "bracket") => true,
             _ => false,
@@ -416,6 +486,9 @@ impl Rules {
             "placement" if placed => true,
             "bracket" => parent == "tuplet",
             "size" => parent == "type",
+            "number" => parent == "key",
+            // An after-grace is a grace after its note; pno marks it with the time it takes.
+            "steal-time-previous" => parent == "grace",
             // Compared as the level of the direction.
             "dynamics" if parent == "sound" => true,
             "dynamics" => parent == "note",
@@ -439,6 +512,27 @@ impl Rules {
             attrs.retain(|a| !a.starts_with("number="));
             attrs.push(end.clone());
         }
+        // 4.1: a playback tempo that differs from a shown metronome mark; the mark is compared.
+        let shown_metronome = |d: Node| {
+            d.descendants()
+                .any(|m| m.has_tag_name("metronome") && m.attribute("print-object") != Some("no"))
+        };
+        if tag == "sound" && n.parent().is_some_and(shown_metronome) {
+            attrs.retain(|a| !a.starts_with("tempo="));
+        }
+        if tag == "wavy-line" && n.attribute("type") == Some("stop") {
+            return String::new();
+        }
+        // A slur with no partner is an error in the source; the import drops it with a report row.
+        if tag == "slur" && !self.span_ends.contains_key(&n.id()) {
+            return String::new();
+        }
+        if let Some(slash) = self.grace_slash.get(&n.id()) {
+            attrs.retain(|a| !a.starts_with("slash="));
+            if *slash {
+                attrs.push("slash=yes".into());
+            }
+        }
         if tag == "pedal" {
             if let Some(kind) = self.pedal_types.get(&n.id()) {
                 if kind.is_empty() {
@@ -451,6 +545,12 @@ impl Rules {
         }
         if tag == "direction" && n.attribute("placement").is_none() {
             attrs.extend(text_placement(n));
+        }
+        // The end of a line is drawn where its start is. 4.1: pno places pedal marks and jump texts.
+        let has_words = n.descendants().any(|d| d.has_tag_name("words"));
+        let fixed_place = is_jump(n) || (has_pedal(n) && !has_words);
+        if tag == "direction" && (only_span_stops(n) || fixed_place) {
+            attrs.retain(|a| !a.starts_with("placement="));
         }
         attrs.sort();
         let words: Vec<Node> = n.children().filter(Node::is_element).collect();
@@ -469,19 +569,18 @@ impl Rules {
         if tag == "metronome" && hidden && quarter {
             return String::new();
         }
-        let own_unit = tag == "time-modification" && unit_is_note_type(n);
         let mut kids: Vec<String> = n
             .children()
             .filter(Node::is_element)
             .filter(|c| !self.skip_child(tag, c.tag_name().name()))
-            .filter(|c| !(own_unit && matches!(c.tag_name().name(), "normal-type" | "normal-dot")))
             .map(|c| self.canon(c, tag))
             .filter(|c| !c.is_empty())
             .collect();
         if tag == "direction" {
-            // 4.1: the staff of a pedal mark; pno writes each one below the lower staff.
-            let pedal = n.descendants().any(|d| d.has_tag_name("pedal"));
-            if pedal {
+            // 4.1: the staff of a pedal mark or jump text; pno writes each pedal mark below the lower
+            // staff and each jump text above the upper staff.
+            let pedal = has_pedal(n);
+            if pedal || is_jump(n) {
                 kids.retain(|k| !k.starts_with("<staff "));
             }
             if pedal || child(n, "staff").is_none() {
@@ -495,8 +594,29 @@ impl Rules {
             }
         }
         let empty = attrs.is_empty() && kids.is_empty();
-        if empty && matches!(tag, "sound" | "direction-type") {
+        if empty && matches!(tag, "sound" | "direction-type" | "notations" | "ornaments") {
             return String::new();
+        }
+        if tag == "note" {
+            kids.retain(|k| k != "<staff >1</>");
+            for kind in tie_types(n) {
+                let tie = format!("<tie type={kind}></>");
+                if kids.contains(&tie) {
+                    continue;
+                }
+                let before = |k: &String| {
+                    k.starts_with("<type") || (kind == "stop" && k.starts_with("<tie type=start"))
+                };
+                let at = kids.iter().position(before).unwrap_or(kids.len());
+                kids.insert(at, tie);
+            }
+        }
+        if tag == "articulations" {
+            // `<detached-legato>` is the staccato and the tenuto sign in one element.
+            if let Some(i) = kids.iter().position(|k| k == "<detached-legato ></>") {
+                kids[i] = "<staccato ></>".into();
+                kids.push("<tenuto ></>".into());
+            }
         }
         if matches!(
             tag,
@@ -511,6 +631,10 @@ impl Rules {
             .map(str::trim)
             .filter(|t| !t.is_empty() && kids.is_empty())
             .unwrap_or("");
+        // A normal notehead is the default notehead.
+        if tag == "notehead" && body == "normal" && attrs.is_empty() {
+            return String::new();
+        }
         format!("<{tag} {}>{body}{}</>", attrs.join(" "), kids.join(""))
     }
 }
@@ -525,6 +649,62 @@ fn dynamics_name<'a>(direction: Node<'a, 'a>) -> Option<&'a str> {
         .find(|d| d.has_tag_name("dynamics"))
         .and_then(|d| d.children().find(Node::is_element))
         .map(|d| d.tag_name().name())
+}
+
+// Of the dynamic levels at one time on one staff, only the last one in document order sounds:
+// each direction that shares its time, with the last one of its time.
+// 4.1: of two marks at one time, the lasting one sets the level.
+fn shared_levels(m: Node) -> HashMap<NodeId, NodeId> {
+    let mut groups: BTreeMap<(i64, String), Vec<(NodeId, bool)>> = BTreeMap::new();
+    let mut pos = 0i64;
+    for e in m.children().filter(Node::is_element) {
+        match e.tag_name().name() {
+            "backup" => pos -= int(e, "duration"),
+            "forward" => pos += int(e, "duration"),
+            "note" if child(e, "chord").is_none() => pos += int(e, "duration"),
+            "direction" if direction_level(e).is_some() => {
+                let key = (pos + int(e, "offset"), text(e, "staff"));
+                let momentary = dynamics_name(e).is_some_and(|n| MOMENTARY.contains(&n));
+                groups.entry(key).or_default().push((e.id(), momentary));
+            }
+            _ => {}
+        }
+    }
+    let mut out = HashMap::new();
+    for ids in groups.values().filter(|ids| ids.len() > 1) {
+        let lasting = ids.iter().rev().find(|(_, momentary)| !momentary);
+        let (end, _) = *lasting.unwrap_or(&ids[ids.len() - 1]);
+        for (id, _) in ids {
+            out.insert(*id, end);
+        }
+    }
+    out
+}
+
+// 4.1: the velocity of a second mark with the same name in one measure; pno keeps the first one.
+fn repeated_marks(m: Node) -> HashSet<NodeId> {
+    let mut marks: Vec<(i64, NodeId, &str)> = Vec::new();
+    let mut pos = 0i64;
+    for e in m.children().filter(Node::is_element) {
+        match e.tag_name().name() {
+            "backup" => pos -= int(e, "duration"),
+            "forward" => pos += int(e, "duration"),
+            "note" if child(e, "chord").is_none() => pos += int(e, "duration"),
+            "direction" => {
+                if let Some(name) = dynamics_name(e) {
+                    marks.push((pos + int(e, "offset"), e.id(), name));
+                }
+            }
+            _ => {}
+        }
+    }
+    marks.sort_by_key(|(t, ..)| *t);
+    let mut seen = HashSet::new();
+    marks
+        .into_iter()
+        .filter(|(_, _, name)| !seen.insert(*name))
+        .map(|(_, id, _)| id)
+        .collect()
 }
 
 // 4.1: a mark with no velocity has the table velocity.
@@ -553,7 +733,7 @@ fn table_level(mark: &str) -> Option<f64> {
 }
 
 impl Level {
-    fn marks(&self, m: Node) -> Vec<(i64, f64, Option<&'static str>)> {
+    fn marks(&self, m: Node, repeated: &HashSet<NodeId>) -> Vec<(i64, f64, Option<&'static str>)> {
         let mut pos = 0i64;
         let mut out = Vec::new();
         for e in m.children().filter(Node::is_element) {
@@ -561,7 +741,7 @@ impl Level {
                 "backup" => pos -= int(e, "duration"),
                 "forward" => pos += int(e, "duration"),
                 "note" if child(e, "chord").is_none() => pos += int(e, "duration"),
-                "direction" => {
+                "direction" if !repeated.contains(&e.id()) => {
                     let Some(v) = direction_level(e) else {
                         continue;
                     };
@@ -593,6 +773,12 @@ impl Level {
     }
 }
 
+// A note with no staff is on staff 1.
+fn staff_of(n: Node) -> String {
+    let s = text(n, "staff");
+    if s.is_empty() { "1".into() } else { s }
+}
+
 fn voice_ranks(m: Node) -> BTreeMap<String, (String, usize)> {
     let mut staffs: BTreeMap<String, BTreeMap<String, usize>> = BTreeMap::new();
     for n in m.children().filter(|n| n.has_tag_name("note")) {
@@ -603,7 +789,7 @@ fn voice_ranks(m: Node) -> BTreeMap<String, (String, usize)> {
         *staffs
             .entry(text(n, "voice"))
             .or_default()
-            .entry(text(n, "staff"))
+            .entry(staff_of(n))
             .or_default() += 1;
     }
     let home: BTreeMap<String, String> = staffs
@@ -791,6 +977,159 @@ fn header(doc: &Document) -> BTreeSet<String> {
     out
 }
 
+fn pitch_key(note: Node) -> Option<String> {
+    let p = child(note, "pitch")?;
+    Some(format!(
+        "{}{}{}",
+        text(p, "step"),
+        text(p, "alter"),
+        text(p, "octave")
+    ))
+}
+
+fn tie_starts(note: Node) -> bool {
+    tie_types(note).contains(&"start")
+}
+
+fn tie_stops(note: Node) -> bool {
+    tie_types(note).contains(&"stop")
+}
+
+// 4.1: pno plays a tie that is only drawn (`<tied>` with no `<tie>`).
+fn tie_types<'a>(note: Node<'a, 'a>) -> Vec<&'a str> {
+    let mut kinds: Vec<&str> = note
+        .descendants()
+        .filter(|c| c.has_tag_name("tie") || c.has_tag_name("tied"))
+        .filter_map(|c| c.attribute("type"))
+        .filter(|k| matches!(*k, "start" | "stop"))
+        .collect();
+    kinds.sort_unstable();
+    kinds.dedup();
+    kinds
+}
+
+fn without_tie(canon: String, kind: &str) -> String {
+    let mut c = canon.replace(&format!("<tie type={kind}></>"), "");
+    let end = format!("type={kind}></>");
+    let mut from = 0;
+    while let Some(at) = c[from..].find("<tied ").map(|i| from + i) {
+        let close = at + c[at..].find("</>").map_or(0, |i| i + 3);
+        if c[at..close].ends_with(&end) {
+            c.replace_range(at..close, "");
+        } else {
+            from = close.max(at + 1);
+        }
+    }
+    c.replace("<notations ></>", "")
+}
+
+// 4.1 (an error in the source): a tie with no note of the same pitch at its other end. A tied
+// grace note ends on its main note.
+fn lone_ties(doc: &Document) -> HashMap<NodeId, Vec<&'static str>> {
+    let notes: Vec<Timed> = timed(doc)
+        .into_iter()
+        .filter(|t| t.node.has_tag_name("note"))
+        .collect();
+    let mut offsets = Vec::new();
+    for t in &notes {
+        if offsets.len() <= t.measure {
+            offsets.resize(t.measure + 1, (0, 1));
+        }
+        let end = q_add(t.start, t.len);
+        if q_less(offsets[t.measure], end) {
+            offsets[t.measure] = end;
+        }
+    }
+    let mut at = (0, 1);
+    for o in offsets.iter_mut() {
+        let len = *o;
+        *o = at;
+        at = q_add(at, len);
+    }
+    let start = |t: &Timed| q_add(offsets[t.measure], t.start);
+    let end = |t: &Timed| q_add(start(t), t.len);
+    let is_grace = |t: &Timed| child(t.node, "grace").is_some();
+    let mut begins = HashSet::new();
+    let mut stopped_begins = HashSet::new();
+    let mut tie_ends: HashMap<_, Vec<NodeId>> = HashMap::new();
+    for t in &notes {
+        let Some(p) = pitch_key(t.node) else { continue };
+        if !is_grace(t) {
+            begins.insert((p.clone(), start(t)));
+            if tie_stops(t.node) {
+                stopped_begins.insert((p.clone(), start(t)));
+            }
+        }
+        if tie_starts(t.node) {
+            tie_ends.entry((p, end(t))).or_default().push(t.node.id());
+        }
+    }
+    let mut lone: HashMap<NodeId, Vec<&str>> = HashMap::new();
+    for t in &notes {
+        let Some(p) = pitch_key(t.node) else { continue };
+        for kind in tie_types(t.node) {
+            let other_end = match kind {
+                // As the import: a tie ends on a note with a tie stop; MuseScore 3 writes none on the
+                // main note of a tied grace note.
+                "start" if is_grace(t) => begins.contains(&(p.clone(), end(t))),
+                "start" => stopped_begins.contains(&(p.clone(), end(t))),
+                // A grace note ends where it starts: its own tie start is not the start of its stop.
+                _ => tie_ends
+                    .get(&(p.clone(), start(t)))
+                    .is_some_and(|ids| ids.iter().any(|id| *id != t.node.id())),
+            };
+            if !other_end {
+                let kind = if kind == "start" { "start" } else { "stop" };
+                lone.entry(t.node.id()).or_default().push(kind);
+            }
+        }
+    }
+    lone
+}
+
+fn only_span_stops(direction: Node) -> bool {
+    let mut marks = direction
+        .children()
+        .filter(|c| c.has_tag_name("direction-type"))
+        .flat_map(|t| t.children().filter(Node::is_element))
+        .peekable();
+    marks.peek().is_some()
+        && marks.all(|m| {
+            matches!(m.tag_name().name(), "wedge" | "dashes" | "octave-shift")
+                && m.attribute("type") == Some("stop")
+        })
+}
+
+fn has_pedal(direction: Node) -> bool {
+    direction.descendants().any(|d| d.has_tag_name("pedal"))
+}
+
+fn is_jump(direction: Node) -> bool {
+    let jump_attrs = ["dacapo", "dalsegno", "fine", "tocoda"];
+    child(direction, "sound").is_some_and(|s| jump_attrs.iter().any(|a| s.has_attribute(*a)))
+}
+
+// 4.1: a group of grace notes has the slash of its first note.
+fn grace_slash(doc: &Document) -> HashMap<NodeId, bool> {
+    let mut out = HashMap::new();
+    for m in doc.descendants().filter(|n| n.has_tag_name("measure")) {
+        let mut groups: HashMap<String, bool> = HashMap::new();
+        for note in m.children().filter(|n| n.has_tag_name("note")) {
+            let voice = text(note, "voice");
+            let Some(grace) = child(note, "grace") else {
+                if child(note, "chord").is_none() {
+                    groups.remove(&voice);
+                }
+                continue;
+            };
+            let own = grace.attribute("slash") == Some("yes");
+            let slash = *groups.entry(voice).or_insert(own);
+            out.insert(grace.id(), slash);
+        }
+    }
+    out
+}
+
 fn is_lone_pedal_stop(direction: Node) -> bool {
     let marks: Vec<Node> = direction
         .children()
@@ -809,19 +1148,33 @@ pub fn content(xml: &str, detail: Detail) -> Content {
         detail,
         span_ends: span_ends(&doc),
         pedal_types: pedal_types(&doc),
+        grace_slash: grace_slash(&doc),
     };
+    let lone = lone_ties(&doc);
+    // `level` leaves out the repeated marks, as pno does; `sounding` is the level the source plays.
     let mut level = Level {
         carried: DEFAULT_LEVEL,
     };
+    let mut sounding = Level {
+        carried: DEFAULT_LEVEL,
+    };
+    let none = HashSet::new();
     let mut state: BTreeMap<String, String> = BTreeMap::new();
     let mut div = 1;
     let mut measures: Vec<Vec<String>> = Vec::new();
     let mut prev_end = String::new();
+    let mut grace_ties: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut main_ties: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for m in doc.descendants().filter(|n| n.has_tag_name("measure")) {
         div = divisions(m).unwrap_or(div);
         let times = note_times(m, div);
-        let marks = level.marks(m);
+        let repeated = repeated_marks(m);
+        let mut marks = level.marks(m, &repeated);
+        // 4.1: of two marks at one time, pno keeps the lasting one as the level.
+        marks.sort_by_key(|x| (x.0, x.2.is_none()));
+        let all_marks = sounding.marks(m, &none);
         let ranks = voice_ranks(m);
+        let shared = shared_levels(m);
         let mut items = Vec::new();
         let (mut pos, mut last, mut end) = (0i64, 0i64, 0i64);
         let mut small = false;
@@ -836,7 +1189,9 @@ pub fn content(xml: &str, detail: Detail) -> Content {
                         if matches!(name, "divisions" | "staves" | "staff-details") {
                             continue;
                         }
-                        let key = format!("{name}{}", k.attribute("number").unwrap_or(""));
+                        // pno has one key for both staves.
+                        let staff = k.attribute("number").filter(|_| name != "key");
+                        let key = format!("{name}{}", staff.unwrap_or(""));
                         let c = rules.canon(k, tag);
                         if state.get(&key) != Some(&c) {
                             items.push(format!("{} attr {c}", at(pos)));
@@ -867,21 +1222,46 @@ pub fn content(xml: &str, detail: Detail) -> Content {
                     if hidden {
                         continue;
                     }
-                    let (staff, rank) = ranks.get(&text(e, "voice")).cloned().unwrap_or_default();
+                    let voice = text(e, "voice");
+                    let grace = child(e, "grace").is_some();
+                    if grace && tie_starts(e) {
+                        grace_ties
+                            .entry(voice.clone())
+                            .or_default()
+                            .extend(pitch_key(e));
+                    }
+                    if !grace && !chord {
+                        let pending = grace_ties.remove(&voice).unwrap_or_default();
+                        main_ties.insert(voice.clone(), pending);
+                    }
+                    let after_tied_grace = !grace
+                        && pitch_key(e)
+                            .is_some_and(|p| main_ties.get(&voice).is_some_and(|t| t.contains(&p)));
+                    let (staff, rank) = ranks.get(&voice).cloned().unwrap_or_default();
                     let lvl = level.at(&marks, start);
                     let vel = e
                         .attribute("dynamics")
                         .and_then(|v| v.parse::<f64>().ok())
-                        .filter(|v| (v - lvl).abs() > 0.01)
+                        .unwrap_or_else(|| sounding.at(&all_marks, start));
+                    let is_rest = child(e, "rest").is_some();
+                    let vel = Some(vel)
+                        .filter(|v| !is_rest && (v - lvl).abs() > 0.01)
                         .map(|v| format!(" vel={v:.2}"))
                         .unwrap_or_default();
                     let size = if small { " small" } else { "" };
                     let (when, length) = times
                         .get(&e.id())
                         .map_or((at(start), at(d)), |t| (q_text(t.0), q_text(t.1)));
+                    let mut c = rules.canon(e, tag);
+                    // MuseScore 3 writes no tie stop on the main note of a tied grace note; pno writes one.
+                    if after_tied_grace {
+                        c = without_tie(c, "stop");
+                    }
+                    for kind in lone.get(&e.id()).into_iter().flatten() {
+                        c = without_tie(c, kind);
+                    }
                     items.push(format!(
-                        "{when} s{staff}v{rank} dur={length}{vel}{size} {}",
-                        rules.canon(e, tag)
+                        "{when} s{staff}v{rank} dur={length}{vel}{size} {c}"
                     ));
                 }
                 "direction" => {
@@ -896,8 +1276,21 @@ pub fn content(xml: &str, detail: Detail) -> Content {
                     if !marks.iter().any(|m| c.contains(m)) {
                         continue;
                     }
-                    if let Some(v) = direction_level(e) {
-                        c.push_str(&format!(" level={v:.2}"));
+                    let only_sound = !c.contains("<direction-type");
+                    if let (true, Some(s), None) =
+                        (only_sound, child(e, "sound"), direction_level(e))
+                    {
+                        // A direction with only a sound is the same as a sound in the measure.
+                        items.push(format!("{} {}", at(t), rules.canon(s, tag)));
+                        continue;
+                    }
+                    let level = direction_level(e).filter(|_| !repeated.contains(&e.id()));
+                    match (level, shared.get(&e.id())) {
+                        (Some(v), None) => c.push_str(&format!(" level={v:.2}")),
+                        (Some(v), Some(end)) if *end == e.id() => {
+                            items.push(format!("{} level s{} {v:.2}", at(t), text(e, "staff")));
+                        }
+                        _ => {}
                     }
                     if jump {
                         // 4.1: the words of jump texts.
@@ -939,8 +1332,20 @@ pub fn content(xml: &str, detail: Detail) -> Content {
         }
         prev_end = frac(end, div * 4);
         level.carried = level.at(&marks, i64::MAX);
+        sounding.carried = sounding.at(&all_marks, i64::MAX);
         items.sort();
         measures.push(items);
+    }
+    // A pedal, hairpin, dashed line or ottava that is open at the end of the score ends there.
+    if let Some(items) = measures.last_mut() {
+        let at_end = format!("{prev_end} dir ");
+        let lines = ["<pedal ", "<wedge ", "<dashes ", "<octave-shift "];
+        items.retain(|i| {
+            let line_stop = lines.iter().any(|l| i.contains(l))
+                && i.contains("type=stop")
+                && !i.contains("type=start");
+            !(i.starts_with(&at_end) && line_stop)
+        });
     }
     Content {
         header: header(&doc),

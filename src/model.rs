@@ -6,6 +6,12 @@ pub struct Score {
     pub bars: Vec<Bar>,
 }
 
+impl Score {
+    pub fn one_staff(&self) -> bool {
+        self.header.contains(&Attr::OneStaff)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Bar {
     pub label: String,
@@ -122,6 +128,8 @@ pub enum Tok {
     Tempo(Tempo),
     Clef(Clef),
     Ottava(Ottava),
+    // The wavy line of a trill over several notes; the trill sign is `:tr` on its first note.
+    Trill,
     Phrase(PhraseMark),
 }
 
@@ -212,6 +220,7 @@ pub enum MarkKind {
     Text,
     Dyn,
     Hairpin,
+    Trill,
 }
 
 impl MarkKind {
@@ -222,6 +231,7 @@ impl MarkKind {
             MarkKind::Text => "txt",
             MarkKind::Dyn => "dyn",
             MarkKind::Hairpin => "hp",
+            MarkKind::Trill => "trl",
         }
     }
 }
@@ -258,8 +268,8 @@ impl Lane {
                 _ => None,
             };
         };
-        let (name, n) = match kind.strip_suffix('2') {
-            Some(base) => (base, 2),
+        let (name, n) = match kind.strip_suffix(['2', '3']) {
+            Some(base) => (base, if kind.ends_with('2') { 2 } else { 3 }),
             None => (kind, 1),
         };
         let kind = match name {
@@ -268,10 +278,11 @@ impl Lane {
             "txt" => MarkKind::Text,
             "dyn" => MarkKind::Dyn,
             "hp" => MarkKind::Hairpin,
+            "trl" => MarkKind::Trill,
             _ => return None,
         };
         let has_second = matches!(kind, MarkKind::Text | MarkKind::Dyn | MarkKind::Hairpin);
-        if n == 2 && !has_second {
+        if n > 1 && !has_second {
             return None;
         }
         Some(Lane::Mark(staff, kind, n))
@@ -294,7 +305,10 @@ impl Lane {
         match self {
             Lane::Ped | Lane::PedRule | Lane::Tempo => true,
             Lane::Mark(_, k, _) => {
-                matches!(k, MarkKind::Ottava | MarkKind::Text | MarkKind::Hairpin)
+                matches!(
+                    k,
+                    MarkKind::Ottava | MarkKind::Text | MarkKind::Hairpin | MarkKind::Trill
+                )
             }
             Lane::Voice(..) | Lane::Phrase => false,
         }
@@ -385,6 +399,16 @@ pub enum PitchMark {
     Release(f64),
     TieUp,
     TieDown,
+    // A glissando from this pitch to the next chord of the lane.
+    Gliss(GlissLine),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GlissLine {
+    Wavy,
+    WavyText,
+    Straight,
+    StraightText,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -431,6 +455,7 @@ pub enum Articulation {
     Tenuto,
     Accent,
     Marcato,
+    MarcatoDown,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -618,6 +643,15 @@ pub struct Text {
     pub text: String,
     pub ext: bool,
     pub place: Option<Place>,
+    pub frame: TextFrame,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum TextFrame {
+    #[default]
+    None,
+    Box,
+    Rehearsal,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -682,6 +716,10 @@ pub enum Clef {
     Bass,
     Alto,
     Tenor,
+    Treble8va,
+    Treble8vb,
+    Bass8va,
+    Bass8vb,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -887,6 +925,8 @@ pub enum Attr {
     Program(u32),
     Volume(f64),
     Pan(f64),
+    // `staves=1`: a score with only the upper staff.
+    OneStaff,
 }
 
 impl Attr {
@@ -912,6 +952,7 @@ impl Attr {
             Attr::Program(_) => (14, 0),
             Attr::Volume(_) => (15, 0),
             Attr::Pan(_) => (16, 0),
+            Attr::OneStaff => (17, 0),
         }
     }
 
@@ -919,6 +960,7 @@ impl Attr {
         matches!(
             self,
             Attr::Format(_)
+                | Attr::OneStaff
                 | Attr::Meta(..)
                 | Attr::PedalStyle(_)
                 | Attr::Program(_)

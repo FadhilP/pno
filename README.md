@@ -120,10 +120,10 @@ The editing commands write the file only if the result passes `check`.
 
 | Area | Limit |
 |---|---|
-| Scope | One piano part: two staves, at most four voices on each staff. |
+| Scope | One piano part: two staves (or one with `@ staves=1`), at most four voices on each staff. |
 | Dropped by design | Layout coordinates, page style, fonts, colors, chord symbols, source voice numbers, and the placement of articulations. The import reports each one. |
 | Stems and beams | Not kept by default; MuseScore draws them. `--keep stems,beams` keeps them. |
-| Not supported yet | Lyrics, multi-bar rests, glissando lines, half pedal, a tuplet across a barline, notes shorter than a 128th, a bar that is longer than its time signature by a part of a beat, and more (SPEC section 3.12). The import stops and names the feature. It never drops it silently. |
+| Not supported yet | Lyrics, multi-bar rests, half pedal, a tuplet across a barline, notes shorter than a 256th, and more (SPEC section 3.12). The import stops and names the feature. It never drops it silently. |
 | Rounded tuplets | The import reads exact note lengths, but directions, clefs and grace notes keep the rounded position of the source. |
 | MuseScore | MuseScore 4 does not read a tie into another voice. |
 | Not an engraver | `render` and PDF export need MuseScore. |
@@ -131,12 +131,12 @@ The editing commands write the file only if the result passes `check`.
 
 ### Corpus coverage
 
-Measured on 2026-11-17. A round trip is import, then export, with the same music as the source.
+Measured on 2026-11-19. A round trip is import, then export, with the same music as the source.
 
 | Corpus | Files | Round trips | Named stops | Faults | Equal bars, all files | Equal bars, files that import |
 |---|---|---|---|---|---|---|
-| [ASAP](https://github.com/fosfrancesco/asap-dataset) (classical, Bach to Ravel) | 235 | 86 (37 %) | 113 | 34 | 37.5 % | 99.0 % |
-| PDMX (other styles) | 105 | 44 (42 %) | 56 | 5 | 49.4 % | 98.7 % |
+| [ASAP](https://github.com/fosfrancesco/asap-dataset) (classical, Bach to Ravel) | 235 | 139 (59 %) | 94 | 2 | 49.4 % | 100.0 % |
+| PDMX (other styles) | 105 | 76 (72 %) | 29 | 0 | 67.3 % | 100.0 % |
 
 - A named stop is a file with a feature that `pno` does not support yet. The import stops and names it. All bars of such a file count as not equal.
 - A fault is a file that imports but does not come back the same.

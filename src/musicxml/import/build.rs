@@ -162,15 +162,14 @@ fn layout_of(
             out.push(*c);
             sum += *c;
         }
-        if sum != len {
-            return Err(stop(
-                "a measure that is longer than its time signature by a part of a beat",
-                &m.number,
-            ));
-        }
+        // A cadenza bar that ends inside a cell ends with `x`, as a split bar does.
         return Ok(Layout {
             cells_attr: Some(out.len() as u32),
-            layout: BarLayout { cells: out, ..base },
+            layout: BarLayout {
+                cells: out,
+                trail: sum - len,
+                ..base
+            },
             second_part: false,
         });
     }
@@ -291,7 +290,10 @@ fn voice_leaves<'s>(
                     .push(n);
                 continue;
             }
-            let after = g.after && leaves.last().is_some() && pending.is_empty();
+            let holds = leaves
+                .last()
+                .is_some_and(|l| l.src[0].head != SrcHead::Hidden);
+            let after = g.after && holds && pending.is_empty();
             if after {
                 if let Some(l) = leaves.last_mut() {
                     l.afters.push(vec![n]);
@@ -312,8 +314,17 @@ fn voice_leaves<'s>(
             l.src.push(n);
             continue;
         }
+        let start = n.start + lead;
+        if n.head == SrcHead::Hidden && !pending.is_empty() {
+            // A `_` has no grace group: the graces sound after the note that ends where it starts.
+            let before = leaves
+                .last_mut()
+                .filter(|l| l.src[0].head != SrcHead::Hidden && l.start + l.dur == start)
+                .ok_or_else(|| stop("grace notes before a hidden rest", number))?;
+            before.afters.append(&mut pending);
+        }
         leaves.push(VoiceLeaf {
-            start: n.start + lead,
+            start,
             dur: n.dur,
             src: vec![n],
             graces: std::mem::take(&mut pending),
@@ -324,6 +335,7 @@ fn voice_leaves<'s>(
     if !pending.is_empty() {
         let l = leaves
             .last_mut()
+            .filter(|l| l.src[0].head != SrcHead::Hidden)
             .ok_or_else(|| stop("grace notes with no main note", number))?;
         l.afters.append(&mut pending);
     }
@@ -368,7 +380,7 @@ impl Ctx<'_> {
                     out.push(*m);
                 }
             }
-            if n.small && i == 0 && n.grace.is_none() {
+            if n.small && i == 0 {
                 out.push(TokMark::Small);
             }
             if n.stem.is_some() {
@@ -450,6 +462,9 @@ fn group_leaves(
                     }
                 }
             };
+            if ratio.0 < 2 {
+                return Err(stop("a tuplet with the number 1", number));
+            }
             open.push(groups.len());
             groups.push(Group {
                 head: GroupHead::Tuplet {
@@ -704,8 +719,16 @@ fn voice_line(
             }
         };
         let marks = cx.tok_marks(&leaf.src);
+        let slash_of = |g: &[&SrcNote]| g[0].grace.as_ref().is_some_and(|x| x.slash);
+        let mixed_slash = leaf
+            .graces
+            .iter()
+            .any(|g| slash_of(g) != slash_of(&leaf.graces[0]));
+        if mixed_slash {
+            cx.rep.drop(Row::GraceSlash);
+        }
         let grace = (!leaf.graces.is_empty()).then(|| Grace {
-            slash: leaf.graces[0][0].grace.as_ref().is_some_and(|g| g.slash),
+            slash: slash_of(&leaf.graces[0]),
             notes: leaf.graces.iter().map(|g| cx.grace_note(g, home)).collect(),
         });
         let after = (!leaf.afters.is_empty()).then(|| Grace {
@@ -840,6 +863,7 @@ enum SpanKind {
     Wedge,
     Dashes,
     Octave,
+    Trill,
 }
 
 #[derive(Default)]
@@ -848,6 +872,12 @@ struct Marks {
 }
 
 impl Marks {
+    fn starts_at(&self, lane: Lane, t: Frac) -> bool {
+        self.lanes
+            .get(&lane)
+            .is_some_and(|items| items.iter().any(|x| x.start == t))
+    }
+
     fn busy(&self, lane: Lane, t: Frac, open: &[OpenSpan]) -> bool {
         let starts = self.lanes.get(&lane).is_some_and(|items| {
             items
@@ -859,7 +889,7 @@ impl Marks {
 
     fn lane_for(&self, staff: Staff, kind: MarkKind, t: Frac, open: &[OpenSpan]) -> Option<Lane> {
         let second = matches!(kind, MarkKind::Dyn | MarkKind::Text | MarkKind::Hairpin);
-        let lanes: &[u8] = if second { &[1, 2] } else { &[1] };
+        let lanes: &[u8] = if second { &[1, 2, 3] } else { &[1] };
         lanes
             .iter()
             .map(|n| Lane::Mark(staff, kind, *n))
@@ -896,24 +926,33 @@ fn mark_lines(
         );
     }
     *open = carried;
-    let close =
-        |marks: &mut Marks, open: &mut Vec<OpenSpan>, kind: SpanKind, number: u32, t: Frac| {
-            let Some(i) = open
-                .iter()
-                .position(|o| o.kind == kind && o.number == number)
-            else {
-                return false;
-            };
-            let o = open.remove(i);
-            if let Some(item) = marks.lanes.get_mut(&o.lane).and_then(|v| {
-                v.iter_mut()
-                    .rev()
-                    .find(|x| x.end.is_none() && !x.tok.is_point())
-            }) {
-                item.end = Some(t);
-            }
-            true
+    // Span numbers repeat across staves (MuseScore numbers each staff from 1): a stop closes
+    // the span of its own staff first.
+    let close = |marks: &mut Marks,
+                 open: &mut Vec<OpenSpan>,
+                 kind: SpanKind,
+                 number: u32,
+                 staff: Staff,
+                 t: Frac| {
+        let same = |o: &OpenSpan| o.kind == kind && o.number == number;
+        let own_staff = |o: &OpenSpan| matches!(o.lane, Lane::Mark(s, ..) if s == staff);
+        let Some(i) = open
+            .iter()
+            .position(|o| same(o) && own_staff(o))
+            .or_else(|| open.iter().position(same))
+        else {
+            return false;
         };
+        let o = open.remove(i);
+        if let Some(item) = marks.lanes.get_mut(&o.lane).and_then(|v| {
+            v.iter_mut()
+                .rev()
+                .find(|x| x.end.is_none() && !x.tok.is_point())
+        }) {
+            item.end = Some(t);
+        }
+        true
+    };
     for (t, staff, clef) in &m.clefs {
         marks.push(
             Lane::Mark(*staff, MarkKind::Clef, 1),
@@ -925,8 +964,10 @@ fn mark_lines(
         );
     }
     let mut dirs: Vec<&SrcDir> = m.dirs.iter().collect();
-    // A span that stops at a time frees its lane for a mark that starts at that time.
-    dirs.sort_by_key(|d| (d.t, !d.kind.is_span_stop()));
+    // A span that stops at a time frees its lane for a mark that starts at that time. Of two
+    // dynamic marks at one time, the one that sets a lasting level takes the first lane, the
+    // lane that sets levels (SPEC 3.5).
+    dirs.sort_by_key(|d| (d.t, !d.kind.is_span_stop(), !d.kind.sets_level()));
     for d in dirs {
         let t = d.t + lead;
         if t > end {
@@ -936,7 +977,7 @@ fn mark_lines(
             DirKind::Dyn { mark, velocity } => {
                 let lane = marks
                     .lane_for(d.staff, MarkKind::Dyn, t, open)
-                    .ok_or_else(|| stop("three dynamic marks at one time", &number))?;
+                    .ok_or_else(|| stop("four dynamic marks at one time", &number))?;
                 let item_end = mark.mark.is_momentary().then(|| {
                     onsets
                         .iter()
@@ -945,7 +986,11 @@ fn mark_lines(
                         .min()
                         .unwrap_or(end)
                 });
-                if lane == Lane::Mark(d.staff, MarkKind::Dyn, 1) {
+                let first_lane = Lane::Mark(d.staff, MarkKind::Dyn, 1);
+                if lane != first_lane && marks.starts_at(first_lane, t) {
+                    cx.rep.drop(Row::DynOrder);
+                }
+                if lane == first_lane {
                     marks_out.push(MarkVelocity {
                         bar,
                         mark: mark.mark,
@@ -964,7 +1009,11 @@ fn mark_lines(
             DirKind::DynText(text) => {
                 let lane = marks
                     .lane_for(d.staff, MarkKind::Dyn, t, open)
-                    .ok_or_else(|| stop("three dynamic marks at one time", &number))?;
+                    .ok_or_else(|| stop("four dynamic marks at one time", &number))?;
+                let first_lane = Lane::Mark(d.staff, MarkKind::Dyn, 1);
+                if lane != first_lane && marks.starts_at(first_lane, t) {
+                    cx.rep.drop(Row::DynOrder);
+                }
                 marks.push(
                     lane,
                     Item {
@@ -981,7 +1030,7 @@ fn mark_lines(
             } => {
                 let lane = marks
                     .lane_for(d.staff, MarkKind::Hairpin, t, open)
-                    .ok_or_else(|| stop("three hairpins at one time", &number))?;
+                    .ok_or_else(|| stop("four hairpins at one time", &number))?;
                 marks.push(
                     lane,
                     Item {
@@ -1001,7 +1050,7 @@ fn mark_lines(
                 number: n,
                 ..
             } => {
-                if !close(&mut marks, open, SpanKind::Wedge, *n, t) {
+                if !close(&mut marks, open, SpanKind::Wedge, *n, d.staff, t) {
                     cx.rep.note(format!(
                         "measure {number}: a hairpin end with no start is dropped"
                     ));
@@ -1010,7 +1059,7 @@ fn mark_lines(
             DirKind::Text { text, dashes } => {
                 let lane = marks
                     .lane_for(d.staff, MarkKind::Text, t, open)
-                    .ok_or_else(|| stop("three texts at one time", &number))?;
+                    .ok_or_else(|| stop("four texts at one time", &number))?;
                 let mut text = text.clone();
                 text.ext = dashes.is_some();
                 marks.push(
@@ -1052,7 +1101,7 @@ fn mark_lines(
                 }
             }
             DirKind::DashesStop { number: n } => {
-                if !close(&mut marks, open, SpanKind::Dashes, *n, t) {
+                if !close(&mut marks, open, SpanKind::Dashes, *n, d.staff, t) {
                     cx.rep.note(format!(
                         "measure {number}: a dashed line end with no start is dropped"
                     ));
@@ -1084,11 +1133,30 @@ fn mark_lines(
                 start: None,
                 number: n,
             } => {
-                if !close(&mut marks, open, SpanKind::Octave, *n, t) {
+                if !close(&mut marks, open, SpanKind::Octave, *n, d.staff, t) {
                     cx.rep.note(format!(
                         "measure {number}: an ottava end with no start is dropped"
                     ));
                 }
+            }
+            DirKind::Trill { start: true } => {
+                let lane = Lane::Mark(d.staff, MarkKind::Trill, 1);
+                marks.push(
+                    lane,
+                    Item {
+                        start: t,
+                        end: None,
+                        tok: Tok::Trill,
+                    },
+                );
+                open.push(OpenSpan {
+                    lane,
+                    number: 1,
+                    kind: SpanKind::Trill,
+                });
+            }
+            DirKind::Trill { start: false } => {
+                close(&mut marks, open, SpanKind::Trill, 1, d.staff, t);
             }
             DirKind::Pedal(..) => {}
         }
@@ -1338,6 +1406,10 @@ fn level_at(marks: &[(Frac, f64, Option<DynMark>)], carried: f64, t: Frac) -> f6
 
 pub fn build(src: &Source, keep: Keep, rep: &mut Report) -> Result<Built, String> {
     let mut header = vec![Attr::Format(1)];
+    if src.one_staff {
+        header.push(Attr::OneStaff);
+        rep.forget(Row::PedalStaff);
+    }
     for (f, t) in &src.meta {
         header.push(Attr::Meta(*f, t.clone()));
     }
@@ -1434,7 +1506,12 @@ pub fn build(src: &Source, keep: Keep, rep: &mut Report) -> Result<Built, String
                 els,
             });
         }
-        for staff in [Staff::Upper, Staff::Lower] {
+        let staves: &[Staff] = if src.one_staff {
+            &[Staff::Upper]
+        } else {
+            &[Staff::Upper, Staff::Lower]
+        };
+        for &staff in staves {
             let lane = Lane::Voice(staff, 1);
             if !lines.iter().any(|l: &Line| l.lane == lane) {
                 lines.push(Line {

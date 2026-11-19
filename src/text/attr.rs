@@ -118,6 +118,12 @@ pub fn parse_attr(name: &str, value: &str) -> Result<Attr, String> {
             }
             Attr::Barline { style, fermata }
         }
+        "staves" if value == "1" => Attr::OneStaff,
+        "staves" => {
+            return Err(format!(
+                "`{value}` is not a value of staves=; write staves=1 for one staff, or no staves= for two"
+            ));
+        }
         "cells" => Attr::Cells(
             value
                 .parse()
@@ -170,7 +176,10 @@ fn parse_key(v: &str) -> Option<Key> {
             mode: None,
         });
     }
-    if let Some(n) = v.strip_suffix('#') {
+    if let Some(n) = v
+        .strip_suffix('#')
+        .filter(|n| n.chars().all(|c| c.is_ascii_digit()))
+    {
         return n
             .parse::<i8>()
             .ok()
@@ -223,6 +232,14 @@ fn parse_time(v: &str) -> Result<Meter, String> {
             });
         }
         _ => {}
+    }
+    for (suffix, symbol) in [(":c", TimeSymbol::Common), (":cut", TimeSymbol::Cut)] {
+        if let Some(plain) = v.strip_suffix(suffix) {
+            return Ok(Meter {
+                symbol: Some(symbol),
+                ..parse_time(plain).map_err(|_| bad())?
+            });
+        }
     }
     let (frac, pattern) = match v.split_once('(') {
         Some((f, p)) => {
@@ -299,10 +316,12 @@ pub fn fmt_num(v: f64) -> String {
 
 impl fmt::Display for Meter {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let plain = self.pattern.is_none() && self.beats.len() == 1;
+        let (four, two) = (plain && self.beats[0] == 4, plain && self.beats[0] == 2);
         match self.symbol {
-            Some(TimeSymbol::Common) => return f.write_str("c"),
-            Some(TimeSymbol::Cut) => return f.write_str("cut"),
-            None => {}
+            Some(TimeSymbol::Common) if four && self.beat_type == 4 => return f.write_str("c"),
+            Some(TimeSymbol::Cut) if two && self.beat_type == 2 => return f.write_str("cut"),
+            _ => {}
         }
         let beats: Vec<String> = self.beats.iter().map(u32::to_string).collect();
         write!(f, "{}/{}", beats.join("+"), self.beat_type)?;
@@ -310,7 +329,11 @@ impl fmt::Display for Meter {
             let groups: Vec<String> = p.iter().map(u32::to_string).collect();
             write!(f, "({})", groups.join("+"))?;
         }
-        Ok(())
+        match self.symbol {
+            Some(TimeSymbol::Common) => f.write_str(":c"),
+            Some(TimeSymbol::Cut) => f.write_str(":cut"),
+            None => Ok(()),
+        }
     }
 }
 
@@ -379,6 +402,7 @@ impl fmt::Display for Attr {
             Attr::Program(p) => write!(f, "program={p}"),
             Attr::Volume(v) => write!(f, "volume={}", fmt_num(*v)),
             Attr::Pan(v) => write!(f, "pan={}", fmt_num(*v)),
+            Attr::OneStaff => f.write_str("staves=1"),
         }
     }
 }

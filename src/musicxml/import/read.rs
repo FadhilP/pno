@@ -4,9 +4,9 @@ use super::report::{Report, Row};
 use crate::frac::{Frac, NoteValue};
 use crate::model::{
     AccDisplay, ArpKind, Articulation, Attr, BarStyle, BracketEnd, Break, Clef, Dyn, DynMark,
-    DynText, Hairpin, Jump, Key, MetaField, Meter, Metronome, Mode, OrnamentKind, Ottava,
-    PedalStyle, PhraseMark, Pitch, PitchMark, Place, Sign, Staff, Tempo, TempoMark, Text,
-    TimeSymbol, TokMark, TupletLook,
+    DynText, GlissLine, Hairpin, Jump, Key, MetaField, Meter, Metronome, Mode, OrnamentKind,
+    Ottava, PedalStyle, PhraseMark, Pitch, PitchMark, Place, Sign, Staff, Tempo, TempoMark, Text,
+    TextFrame, TimeSymbol, TokMark, TupletLook,
 };
 
 const POSITION_ATTRS: [&str; 12] = [
@@ -108,6 +108,9 @@ pub struct SrcNote {
     pub velocity: Option<f64>,
     pub small: bool,
     pub pause: Option<PhraseMark>,
+    pub trill_stop: bool,
+    pub gliss_starts: Vec<u32>,
+    pub gliss_stops: Vec<u32>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -145,15 +148,27 @@ pub enum DirKind {
         start: Option<Ottava>,
         number: u32,
     },
+    Trill {
+        start: bool,
+    },
 }
 
 impl DirKind {
+    pub fn sets_level(&self) -> bool {
+        match self {
+            DirKind::Dyn { mark, .. } => !mark.mark.is_momentary(),
+            DirKind::DynText(t) => t.level.is_some(),
+            _ => false,
+        }
+    }
+
     pub fn is_span_stop(&self) -> bool {
         matches!(
             self,
             DirKind::Wedge { start: None, .. }
                 | DirKind::DashesStop { .. }
                 | DirKind::Octave { start: None, .. }
+                | DirKind::Trill { start: false }
         )
     }
 }
@@ -192,6 +207,7 @@ pub struct Source {
     pub volume: Option<f64>,
     pub pan: Option<f64>,
     pub accidentals_stated: bool,
+    pub one_staff: bool,
     pub measures: Vec<SrcMeasure>,
 }
 
@@ -409,14 +425,163 @@ pub fn read(root: Node, rep: &mut Report) -> Result<Source, String> {
         let measure = read_measure(&mut r, m, &mut state)?;
         src.measures.push(measure);
     }
-    if !state.two_staves {
-        return Err(stop("a part with 1 staff", ""));
-    }
+    src.one_staff = !state.two_staves;
     if state.volta.is_some() {
         return Err(stop("a volta bracket with no end", ""));
     }
+    trill_lines(&mut src.measures)?;
+    glissandi_end_on_the_next_chord(&src.measures)?;
     src.accidentals_stated = state.accidentals_stated.unwrap_or(true);
     Ok(src)
+}
+
+// A glissando ends on the next chord of its voice, as SPEC 3.7 places it.
+fn glissandi_end_on_the_next_chord(measures: &[SrcMeasure]) -> Result<(), String> {
+    let mut chords: std::collections::BTreeMap<&str, Vec<(&str, Vec<&SrcNote>)>> =
+        std::collections::BTreeMap::new();
+    for m in measures {
+        for n in m.notes.iter().filter(|n| n.grace.is_none()) {
+            let list = chords.entry(n.voice.as_str()).or_default();
+            match list.last_mut() {
+                Some((_, notes)) if n.chord => notes.push(n),
+                _ => list.push((m.number.as_str(), vec![n])),
+            }
+        }
+    }
+    let midi = |n: &&SrcNote| match &n.head {
+        SrcHead::Pitch(p) => p.midi(),
+        _ => i32::MIN,
+    };
+    let bad = |number: &str| {
+        stop(
+            "a glissando that does not end on the next chord of its voice",
+            number,
+        )
+    };
+    for list in chords.values_mut() {
+        for (_, notes) in list.iter_mut() {
+            notes.sort_by_key(midi);
+        }
+        let mut expected: Vec<Vec<u32>> = vec![Vec::new(); list.first().map_or(0, |c| c.1.len())];
+        for (ci, (number, notes)) in list.iter().enumerate() {
+            let stops: Vec<Vec<u32>> = notes.iter().map(|n| n.gliss_stops.clone()).collect();
+            let has_stops = stops.iter().any(|s| !s.is_empty());
+            let wanted = expected.iter().any(|s| !s.is_empty());
+            if has_stops != wanted || (has_stops && !same_numbers(&stops, &expected)) {
+                return Err(bad(number));
+            }
+            let starts: Vec<(u32, i32)> = notes
+                .iter()
+                .flat_map(|n| n.gliss_starts.iter().map(move |s| (*s, midi(n))))
+                .collect();
+            let next: &[&SrcNote] = list.get(ci + 1).map_or(&[], |c| &c.1);
+            expected = vec![Vec::new(); next.len()];
+            match (starts.as_slice(), next.len()) {
+                ([], _) => {}
+                (_, 0) => return Err(bad(number)),
+                ([(s, from)], n) => {
+                    let up = midi(&next[n - 1]) >= *from;
+                    expected[if up { n - 1 } else { 0 }].push(*s);
+                }
+                (_, n) if n == starts.len() => {
+                    for (slot, (s, _)) in expected.iter_mut().zip(starts) {
+                        slot.push(s);
+                    }
+                }
+                _ => return Err(bad(number)),
+            }
+        }
+    }
+    Ok(())
+}
+
+fn same_numbers(a: &[Vec<u32>], b: &[Vec<u32>]) -> bool {
+    let sorted = |v: &Vec<u32>| {
+        let mut v = v.clone();
+        v.sort_unstable();
+        v
+    };
+    a.len() == b.len() && a.iter().zip(b).all(|(x, y)| sorted(x) == sorted(y))
+}
+
+// A trill line that covers its note and the notes tied to it is `:trl` (SPEC 3.7). Each other one is
+// a span of the `trl` lane, from its first note to the end of the note that carries its stop, and
+// its first note keeps the trill sign.
+fn trill_lines(measures: &mut [SrcMeasure]) -> Result<(), String> {
+    struct Open {
+        at: (usize, usize),
+        voice: String,
+        head: SrcHead,
+    }
+    let is_line = |t: &TokMark| {
+        matches!(
+            t,
+            TokMark::Ornament {
+                kind: OrnamentKind::TrillLine,
+                ..
+            }
+        )
+    };
+    let mut open: std::collections::HashMap<Staff, Open> = std::collections::HashMap::new();
+    let mut lane_lines = Vec::new();
+    for (mi, m) in measures.iter().enumerate() {
+        for (ni, n) in m.notes.iter().enumerate() {
+            let starts = n.tok_marks.iter().any(is_line);
+            if n.trill_stop {
+                match open.remove(&n.staff) {
+                    Some(o) => {
+                        let tied_on = n.tie_stop && n.voice == o.voice && n.head == o.head;
+                        if o.at != (mi, ni) && !tied_on {
+                            lane_lines.push((o.at, (mi, ni)));
+                        }
+                    }
+                    // A line that starts and stops on this note covers only this note.
+                    None if starts => {}
+                    None => return Err(stop("a trill line end with no start", &m.number)),
+                }
+            }
+            if starts && !n.trill_stop {
+                if open.contains_key(&n.staff) {
+                    return Err(stop("two trill lines on one staff", &m.number));
+                }
+                open.insert(
+                    n.staff,
+                    Open {
+                        at: (mi, ni),
+                        voice: n.voice.clone(),
+                        head: n.head.clone(),
+                    },
+                );
+            }
+        }
+    }
+    if let Some(o) = open.values().next() {
+        return Err(stop("a trill line with no end", &measures[o.at.0].number));
+    }
+    for ((sm, sn), (em, en)) in lane_lines {
+        let first = &mut measures[sm].notes[sn];
+        for t in &mut first.tok_marks {
+            if let TokMark::Ornament { kind, .. } = t {
+                if *kind == OrnamentKind::TrillLine {
+                    *kind = OrnamentKind::Trill;
+                }
+            }
+        }
+        let (staff, t) = (first.staff, first.start);
+        measures[sm].dirs.push(SrcDir {
+            t,
+            staff,
+            kind: DirKind::Trill { start: true },
+        });
+        let last = &measures[em].notes[en];
+        let end = last.start + last.dur;
+        measures[em].dirs.push(SrcDir {
+            t: end,
+            staff,
+            kind: DirKind::Trill { start: false },
+        });
+    }
+    Ok(())
 }
 
 // `pno` has one text for each header field; the report counts a second, different text.
@@ -592,6 +757,7 @@ struct Cursor {
     slack: i64,
     last_exact_start: Frac,
     rounded: bool,
+    rounded_notes: i64,
 }
 
 fn read_measure(r: &mut Reader, m: Node, state: &mut PartState) -> Result<SrcMeasure, String> {
@@ -616,6 +782,7 @@ fn read_measure(r: &mut Reader, m: Node, state: &mut PartState) -> Result<SrcMea
         slack: 0,
         last_exact_start: Frac::ZERO,
         rounded: false,
+        rounded_notes: 0,
     };
     let mut repeat_end = None;
     let mut ending_stop: Option<bool> = None;
@@ -645,6 +812,14 @@ fn read_measure(r: &mut Reader, m: Node, state: &mut PartState) -> Result<SrcMea
                     }
                 }
                 cur.pos += if e.has_tag_name("backup") { -d } else { d };
+                // A backup to the start of the measure after rounded tuplet notes can go past it
+                // by up to one division for each of them.
+                if cur.pos < 0 && -cur.pos <= cur.rounded_notes {
+                    cur.pos = 0;
+                }
+                if e.has_tag_name("backup") {
+                    cur.rounded_notes = 0;
+                }
                 if cur.pos < 0 {
                     return Err(r.stop("a <backup> before the start of the measure"));
                 }
@@ -700,6 +875,7 @@ fn read_measure(r: &mut Reader, m: Node, state: &mut PartState) -> Result<SrcMea
                 });
             }
             "harmony" => r.rep.drop(Row::ChordSymbols),
+            "figured-bass" if kids(e).next().is_none() => {}
             _ => return Err(r.unknown(e, "measure")),
         }
         let at = exact_start(&cur, 4 * state.div.max(1));
@@ -847,10 +1023,10 @@ fn key(r: &mut Reader, c: Node) -> Result<Key, String> {
 }
 
 fn time(r: &mut Reader, c: Node) -> Result<Meter, String> {
-    r.attrs(c, &["number", "symbol"])?;
     if c.attribute("print-object") == Some("no") {
         return Err(r.stop("a hidden time signature"));
     }
+    r.attrs(c, &["number", "symbol"])?;
     let symbol = match c.attribute("symbol") {
         Some("common") => Some(TimeSymbol::Common),
         Some("cut") => Some(TimeSymbol::Cut),
@@ -881,14 +1057,6 @@ fn time(r: &mut Reader, c: Node) -> Result<Meter, String> {
         pattern: None,
         symbol,
     };
-    let standard = match symbol {
-        Some(TimeSymbol::Common) => meter.beats == [4] && beat_type == 4,
-        Some(TimeSymbol::Cut) => meter.beats == [2] && beat_type == 2,
-        None => true,
-    };
-    if !standard {
-        return Err(r.stop("a time symbol on a time signature that is not 4/4 or 2/2"));
-    }
     Ok(meter)
 }
 
@@ -900,20 +1068,27 @@ fn clef(r: &mut Reader, c: Node) -> Result<(Staff, Clef), String> {
     let staff = staff_of(r, c.attribute("number").unwrap_or("1"))?;
     let sign = child_text(c, "sign").unwrap_or_default();
     let line = child_text(c, "line").unwrap_or_default();
-    if child_text(c, "clef-octave-change").is_some_and(|o| o != "0") {
-        return Err(r.stop("a clef with an octave number"));
-    }
+    let octave = child_text(c, "clef-octave-change").unwrap_or_default();
     for x in kids(c) {
         if !matches!(x.tag_name().name(), "sign" | "line" | "clef-octave-change") {
             return Err(r.unknown(x, "clef"));
         }
     }
-    let clef = match (sign.as_str(), line.as_str()) {
-        ("G", "2" | "") => Clef::Treble,
-        ("F", "4" | "") => Clef::Bass,
-        ("C", "3") => Clef::Alto,
-        ("C", "4") => Clef::Tenor,
-        _ => return Err(r.stop(&format!("the clef {sign}{line}"))),
+    let clef = match (sign.as_str(), line.as_str(), octave.as_str()) {
+        ("G", "2" | "", "" | "0") => Clef::Treble,
+        ("F", "4" | "", "" | "0") => Clef::Bass,
+        ("C", "3", "" | "0") => Clef::Alto,
+        ("C", "4", "" | "0") => Clef::Tenor,
+        ("G", "2" | "", "1") => Clef::Treble8va,
+        ("G", "2" | "", "-1") => Clef::Treble8vb,
+        ("F", "4" | "", "1") => Clef::Bass8va,
+        ("F", "4" | "", "-1") => Clef::Bass8vb,
+        (_, _, "" | "0") => return Err(r.stop(&format!("the clef {sign}{line}"))),
+        _ => {
+            return Err(r.stop(&format!(
+                "the clef {sign}{line} with the octave number {octave}"
+            )));
+        }
     };
     Ok((staff, clef))
 }
@@ -937,6 +1112,7 @@ fn note_value(name: &str) -> Option<i32> {
         "32nd" => -5,
         "64th" => -6,
         "128th" => -7,
+        "256th" => -8,
         _ => return None,
     })
 }
@@ -1025,7 +1201,11 @@ fn read_note(r: &mut Reader, e: Node, div: i64, cur: &mut Cursor) -> Result<SrcN
         velocity: None,
         small: false,
         pause: None,
+        trill_stop: false,
+        gliss_starts: Vec::new(),
+        gliss_stops: Vec::new(),
     };
+    let mut played = (false, false);
     if let Some(v) = e.attribute("dynamics") {
         let pct: f64 = v
             .parse()
@@ -1119,8 +1299,14 @@ fn read_note(r: &mut Reader, e: Node, div: i64, cur: &mut Cursor) -> Result<SrcN
             }
             "duration" => dur_ticks = number(c, "duration", &r.measure)?,
             "tie" => match c.attribute("type") {
-                Some("start") => n.tie_start = true,
-                Some("stop") => n.tie_stop = true,
+                Some("start") => {
+                    n.tie_start = true;
+                    played.0 = true;
+                }
+                Some("stop") => {
+                    n.tie_stop = true;
+                    played.1 = true;
+                }
                 _ => {}
             },
             "instrument" => {}
@@ -1172,6 +1358,12 @@ fn read_note(r: &mut Reader, e: Node, div: i64, cur: &mut Cursor) -> Result<SrcN
                     .transpose()?
                     .unwrap_or(1);
                 n.time_mod = Some((actual, normal));
+                let dotted = |x: Node, dot: &str| kids(x).filter(|k| k.has_tag_name(dot)).count();
+                let unit = child(c, "normal-type").map(|u| (text_of(u), dotted(c, "normal-dot")));
+                let own = child(e, "type").map(|t| (text_of(t), dotted(e, "dot")));
+                if unit.is_some() && unit != own {
+                    r.rep.drop(Row::TupletUnit);
+                }
             }
             "stem" => {
                 r.attrs(c, &[])?;
@@ -1189,6 +1381,17 @@ fn read_note(r: &mut Reader, e: Node, div: i64, cur: &mut Cursor) -> Result<SrcN
                 let shape = text_of(c);
                 if shape != "normal" {
                     return Err(r.stop(&format!("the notehead shape {shape}")));
+                }
+                let hollow_value = matches!(
+                    child_text(e, "type").as_deref(),
+                    Some("half" | "whole" | "breve" | "long" | "maxima")
+                );
+                let filled = match c.attribute("filled") {
+                    Some(v) => v == "yes",
+                    None => !hollow_value,
+                };
+                if filled == hollow_value {
+                    return Err(r.stop("a notehead fill that is not the fill of its note value"));
                 }
             }
             "staff" => n.staff = staff_of(r, &text_of(c))?,
@@ -1215,9 +1418,14 @@ fn read_note(r: &mut Reader, e: Node, div: i64, cur: &mut Cursor) -> Result<SrcN
             _ => return Err(r.unknown(c, "note")),
         }
     }
+    let start_not_played = n.tie_start && !played.0;
+    let stop_not_played = n.tie_stop && !played.1;
+    if start_not_played || stop_not_played {
+        r.rep.drop(Row::TiedNotPlayed);
+    }
     match (hidden, &n.head) {
         (false, _) => {}
-        (true, SrcHead::Rest) => n.head = SrcHead::Hidden,
+        (true, SrcHead::Rest | SrcHead::BarRest) => n.head = SrcHead::Hidden,
         (true, _) => {
             n.hidden = true;
             if n.small {
@@ -1258,6 +1466,7 @@ fn read_note(r: &mut Reader, e: Node, div: i64, cur: &mut Cursor) -> Result<SrcN
             cur.pos += dur_ticks;
             if n.dur != ticks {
                 cur.rounded = true;
+                cur.rounded_notes += 1;
                 // The rounding of one tuplet is less than one division for each of its notes.
                 let actual = n.time_mod.map_or(1, |(a, _)| i64::from(a));
                 cur.slack = (cur.slack + 1).min(actual);
@@ -1364,6 +1573,9 @@ fn notations(r: &mut Reader, n: Node, note: &mut SrcNote) -> Result<(), String> 
                         "staccatissimo" => &[Articulation::Staccatissimo],
                         "tenuto" => &[Articulation::Tenuto],
                         "accent" => &[Articulation::Accent],
+                        "strong-accent" if a.attribute("type") == Some("down") => {
+                            &[Articulation::MarcatoDown]
+                        }
                         "strong-accent" => &[Articulation::Marcato],
                         "detached-legato" => &[Articulation::Staccato, Articulation::Tenuto],
                         "breath-mark" | "caesura" if matches!(note.head, SrcHead::Rest) => {
@@ -1442,7 +1654,28 @@ fn notations(r: &mut Reader, n: Node, note: &mut SrcNote) -> Result<(), String> 
                 }
             }
             "non-arpeggiate" => return Err(r.stop("a bracket for chords that are not arpeggios")),
-            "glissando" | "slide" => return Err(r.stop("a glissando line")),
+            "glissando" | "slide" => {
+                r.attrs(c, &["type", "number", "line-type"])?;
+                let number: u32 = c.attribute("number").unwrap_or("1").parse().unwrap_or(1);
+                if c.attribute("type") == Some("stop") {
+                    note.gliss_stops.push(number);
+                    continue;
+                }
+                let text = match text_of(c).trim() {
+                    "" => false,
+                    "gliss." => true,
+                    other => return Err(r.stop(&format!("a glissando with the text {other}"))),
+                };
+                let line = match (c.tag_name().name(), c.attribute("line-type"), text) {
+                    ("glissando", Some("wavy"), false) => GlissLine::Wavy,
+                    ("glissando", Some("wavy"), true) => GlissLine::WavyText,
+                    ("slide", None | Some("solid"), false) => GlissLine::Straight,
+                    ("slide", None | Some("solid"), true) => GlissLine::StraightText,
+                    _ => return Err(r.stop("a glissando line of another type")),
+                };
+                note.gliss_starts.push(number);
+                note.pitch_marks.push(PitchMark::Gliss(line));
+            }
             "dynamics" => return Err(r.stop("a dynamic mark on a note")),
             other => return Err(r.stop(&format!("the notation {other}"))),
         }
@@ -1495,8 +1728,10 @@ fn ornaments(r: &mut Reader, c: Node, note: &mut SrcNote) -> Result<(), String> 
         match name {
             "wavy-line" => {
                 r.attrs(x, &["type", "number", "placement"])?;
-                if x.attribute("type") == Some("start") {
-                    trill_line = true;
+                match x.attribute("type") {
+                    Some("start") => trill_line = true,
+                    Some("stop") => note.trill_stop = true,
+                    _ => {}
                 }
             }
             "accidental-mark" => {
@@ -1640,6 +1875,7 @@ fn direction(
     let mut metronome: Option<(Metronome, bool, bool)> = None;
     let mut dashes_start = None;
     let mut words_place = place;
+    let mut frame = TextFrame::None;
     for dt in &types {
         r.attrs(*dt, &[])?;
         for x in kids(*dt) {
@@ -1647,8 +1883,17 @@ fn direction(
             match name {
                 "words" => {
                     r.attrs(x, &["enclosure", "dir"])?;
-                    if x.attribute("enclosure").is_some_and(|v| v != "none") {
-                        return Err(r.stop("a text with a frame"));
+                    match x.attribute("enclosure") {
+                        None | Some("none") => {}
+                        Some("rectangle") if frame == TextFrame::Rehearsal => {
+                            return Err(
+                                r.stop("a rehearsal mark and a boxed text in one direction")
+                            );
+                        }
+                        Some("rectangle") => frame = TextFrame::Box,
+                        Some(shape) => {
+                            return Err(r.stop(&format!("a text with a frame of shape {shape}")));
+                        }
                     }
                     let text = x.text().unwrap_or("").to_string();
                     match pieces.last_mut() {
@@ -1710,7 +1955,7 @@ fn direction(
                 }
                 "pedal" => {
                     r.attrs(x, &["type", "line", "sign", "abbreviated"])?;
-                    if staff == Staff::Upper {
+                    if staff == Staff::Upper || place == Some(Place::Above) {
                         r.rep.drop(Row::PedalStaff);
                     }
                     let style = if yes(x, "line") {
@@ -1767,6 +2012,9 @@ fn direction(
                             "beat-unit" if unit.is_none() => unit = Some(text_of(k)),
                             "beat-unit" => return Err(r.stop("a metric modulation mark")),
                             "beat-unit-dot" => dotted = true,
+                            "per-minute" if text_of(k).is_empty() => {
+                                return Err(r.stop("a metronome mark with no number"));
+                            }
                             "per-minute" => {
                                 let v: f64 = text_of(k)
                                     .parse()
@@ -1809,7 +2057,14 @@ fn direction(
                     r.rep.drop(Row::TextBracket);
                     pieces.push(Piece::Other);
                 }
-                "rehearsal" => return Err(r.stop("a rehearsal mark")),
+                "rehearsal" => {
+                    r.attrs(x, &[])?;
+                    if frame == TextFrame::Box {
+                        return Err(r.stop("a rehearsal mark and a boxed text in one direction"));
+                    }
+                    frame = TextFrame::Rehearsal;
+                    pieces.push(Piece::Words(x.text().unwrap_or("").to_string()));
+                }
                 other => return Err(r.stop(&format!("the direction {other}"))),
             }
         }
@@ -1835,6 +2090,9 @@ fn direction(
         };
         if !words.is_empty() {
             r.rep.drop(Row::JumpText);
+        }
+        if staff == Staff::Lower || place == Some(Place::Below) {
+            r.rep.drop(Row::JumpPlace);
         }
         out.attrs.push(Attr::Jump(kind));
         return Ok(());
@@ -1914,7 +2172,7 @@ fn direction(
             (Some((m, parens, true)), sound) => {
                 let value = tempo_value(&m);
                 if sound.is_some_and(|s| (s - value).abs() > 0.01) {
-                    return Err(r.stop("a tempo sound that differs from its metronome mark"));
+                    r.rep.drop(Row::TempoSound);
                 }
                 Some(TempoMark::Shown {
                     metronome: m,
@@ -1969,6 +2227,7 @@ fn direction(
                     text,
                     ext: false,
                     place: place.filter(|p| *p != default),
+                    frame,
                 },
                 dashes: dashes_start,
             },

@@ -7,9 +7,9 @@ use crate::analysis::{Analysis, Leaf, NoteRef, Part, PedalAction, Span, TupletGr
 use crate::frac::{Frac, NoteValue, lcm};
 use crate::model::{
     AccDisplay, ArpKind, Articulation, Attr, BarStyle, BracketEnd, Break, Clef, Dyn, Event,
-    GroupHead, Hairpin, Head, Jump, Key, Lane, MarkKind, MetaField, Meter, Mode, Note,
-    OrnamentKind, Ottava, PedalStyle, PhraseMark, Pitch, PitchMark, Place, Sign, Staff, Tempo,
-    TempoMark, TimeSymbol, Tok, TokMark, TupletLook,
+    GlissLine, GraceNote, GroupHead, Hairpin, Head, Jump, Key, Lane, MarkKind, MetaField, Meter,
+    Mode, Note, OrnamentKind, Ottava, PedalStyle, PhraseMark, Pitch, PitchMark, Place, Sign, Staff,
+    Tempo, TempoMark, TextFrame, TimeSymbol, Tok, TokMark, TupletLook,
 };
 
 const MUSICXML_VELOCITY_BASE: f64 = 90.0;
@@ -331,13 +331,18 @@ fn measure(ctx: &Ctx, b: usize, state: &mut State, out: &mut String) -> Result<(
         let Lane::Voice(staff, 1) = *lane else {
             continue;
         };
+        // In time order in one stream, a span stop cannot come before its start (MusicXML
+        // readers pair them in document order). A direction goes before the note, gap or
+        // later direction-free item at its time; directions of one time keep their order.
         let mut keep = Vec::new();
         for d in free.drain(..) {
-            let target = items.iter().position(|n| n.t == d.0.t && n.order == 1);
-            match (d.1 == staff, target) {
-                (true, Some(i)) => items.insert(i, d.0),
-                _ => keep.push(d),
+            if d.1 != staff {
+                keep.push(d);
+                continue;
             }
+            let after = |n: &Item| n.t > d.0.t || (n.t == d.0.t && n.advance > 0);
+            let i = items.iter().position(after).unwrap_or(items.len());
+            items.insert(i, d.0);
         }
         free = keep;
     }
@@ -500,15 +505,31 @@ fn time_xml(m: &Meter) -> String {
     )
 }
 
+fn gliss_look(line: GlissLine) -> (&'static str, &'static str) {
+    match line {
+        GlissLine::Wavy | GlissLine::WavyText => ("glissando", "wavy"),
+        GlissLine::Straight | GlissLine::StraightText => ("slide", "solid"),
+    }
+}
+
 fn clef_xml(staff: Staff, c: Clef) -> String {
-    let (sign, line) = match c {
-        Clef::Treble => ("G", 2),
-        Clef::Bass => ("F", 4),
-        Clef::Alto => ("C", 3),
-        Clef::Tenor => ("C", 4),
+    let (sign, line, octave) = match c {
+        Clef::Treble => ("G", 2, 0),
+        Clef::Bass => ("F", 4, 0),
+        Clef::Alto => ("C", 3, 0),
+        Clef::Tenor => ("C", 4, 0),
+        Clef::Treble8va => ("G", 2, 1),
+        Clef::Treble8vb => ("G", 2, -1),
+        Clef::Bass8va => ("F", 4, 1),
+        Clef::Bass8vb => ("F", 4, -1),
+    };
+    let octave = if octave == 0 {
+        String::new()
+    } else {
+        format!("          <clef-octave-change>{octave}</clef-octave-change>\n")
     };
     format!(
-        "        <clef number=\"{}\">\n          <sign>{sign}</sign>\n          <line>{line}</line>\n        </clef>\n",
+        "        <clef number=\"{}\">\n          <sign>{sign}</sign>\n          <line>{line}</line>\n{octave}        </clef>\n",
         staff.number()
     )
 }
@@ -550,10 +571,16 @@ fn attributes(ctx: &Ctx, b: usize, state: &mut State, out: &mut String) -> Resul
         body.push_str(&time_xml(&bar.layout.meter));
         state.meter = Some(bar.layout.meter.clone());
     }
-    if first {
+    let one = a.score.one_staff();
+    if first && !one {
         body.push_str("        <staves>2</staves>\n");
     }
-    for staff in [Staff::Upper, Staff::Lower] {
+    let staves: &[Staff] = if one {
+        &[Staff::Upper]
+    } else {
+        &[Staff::Upper, Staff::Lower]
+    };
+    for &staff in staves {
         let k = usize::from(staff.number() - 1);
         let at_start = clef_tokens(a, b, staff)
             .into_iter()
@@ -592,6 +619,31 @@ fn voice_number(lane: Lane) -> u8 {
         Lane::Voice(Staff::Lower, n) => n + 4,
         _ => 1,
     }
+}
+
+// The note values of a length, longest first: one if it is a note value, else plain values.
+fn note_values(len: Frac) -> Option<Vec<Frac>> {
+    if NoteValue::of(len).is_some() {
+        return Some(vec![len]);
+    }
+    let mut out = Vec::new();
+    let mut rest = len;
+    while rest > Frac::ZERO && out.len() < 8 {
+        let mut v = Frac::int(1);
+        while v > rest {
+            v = v / 2;
+        }
+        while v * 2 <= rest {
+            v = v * 2;
+        }
+        out.push(v);
+        rest = rest - v;
+    }
+    rest.is_zero().then_some(out)
+}
+
+fn at_leaf(a: &Analysis, leaf: &Leaf, e: String) -> String {
+    format!("{e} (bar {}, {})", a.score.bars[leaf.bar].label, leaf.lane)
 }
 
 fn written_type(d: Frac) -> Result<(&'static str, u8), String> {
@@ -647,28 +699,55 @@ fn leaf_items(ctx: &Ctx, id: usize, leaf: &Leaf, items: &mut Vec<Item>) -> Resul
             return Ok(());
         }
         Tok::Empty => {
-            let (ty, dots) = written_type(leaf.written)?;
-            let mut xml = format!(
-                "      <note print-object=\"no\">\n        <rest/>\n        <duration>{dur}</duration>\n"
-            );
-            let _ = writeln!(
-                xml,
-                "        <voice>{voice}</voice>\n        <type>{ty}</type>"
-            );
-            xml.push_str(&"        <dot/>\n".repeat(usize::from(dots)));
-            xml.push_str(&time_mod(a, leaf));
-            let _ = writeln!(xml, "        <staff>{}</staff>", staff.number());
+            // An empty run in a tuplet is hidden rests: one for each note value of its length.
+            let not_a_value = || {
+                at_leaf(
+                    a,
+                    leaf,
+                    format!("internal: {} is not a note value", leaf.written),
+                )
+            };
+            let pieces = note_values(leaf.written).ok_or_else(not_a_value)?;
             let n = tuplet_notations(a, id);
-            if !n.is_empty() {
-                let _ = write!(xml, "        <notations>\n{n}        </notations>\n");
+            let mut at = t;
+            for (i, piece) in pieces.iter().enumerate() {
+                let share = Frac::int(dur) * *piece / leaf.written;
+                if !share.is_int() {
+                    return Err(not_a_value());
+                }
+                let (ty, dots) = written_type(*piece).map_err(|e| at_leaf(a, leaf, e))?;
+                let mut xml = format!(
+                    "      <note print-object=\"no\">\n        <rest/>\n        <duration>{}</duration>\n",
+                    share.num()
+                );
+                let _ = writeln!(
+                    xml,
+                    "        <voice>{voice}</voice>\n        <type>{ty}</type>"
+                );
+                xml.push_str(&"        <dot/>\n".repeat(usize::from(dots)));
+                xml.push_str(&time_mod(a, leaf));
+                let _ = writeln!(xml, "        <staff>{}</staff>", staff.number());
+                let first = i == 0;
+                let last = i + 1 == pieces.len();
+                let ends: String = n
+                    .lines()
+                    .filter(|l| {
+                        (first && l.contains("\"start\"")) || (last && l.contains("\"stop\""))
+                    })
+                    .map(|l| format!("{l}\n"))
+                    .collect();
+                if !ends.is_empty() {
+                    let _ = write!(xml, "        <notations>\n{ends}        </notations>\n");
+                }
+                xml.push_str("      </note>\n");
+                items.push(Item {
+                    t: at,
+                    order: 1,
+                    xml,
+                    advance: share.num(),
+                });
+                at += share.num();
             }
-            xml.push_str("      </note>\n");
-            items.push(Item {
-                t,
-                order: 1,
-                xml,
-                advance: dur,
-            });
             return Ok(());
         }
         _ => return Ok(()),
@@ -683,7 +762,7 @@ fn leaf_items(ctx: &Ctx, id: usize, leaf: &Leaf, items: &mut Vec<Item>) -> Resul
                 notes: &gn.notes,
                 marks: &gn.marks,
                 dur: 0,
-                type_xml: format!("        <type>{}</type>\n", grace_type(gn, g.notes.len())),
+                type_xml: grace_type_xml(gn, g.notes.len()),
                 grace: Some(format!("        <grace{slash}/>\n")),
             };
             chord_xml(ctx, leaf, ev, &nc, &mut xml)?;
@@ -692,12 +771,8 @@ fn leaf_items(ctx: &Ctx, id: usize, leaf: &Leaf, items: &mut Vec<Item>) -> Resul
     let (type_xml, bar_rest) = if ev.head == Head::BarRest {
         (String::new(), true)
     } else {
-        let (ty, dots) = written_type(leaf.written)?;
-        let size = if ev.has(TokMark::Small) {
-            " size=\"cue\""
-        } else {
-            ""
-        };
+        let (ty, dots) = written_type(leaf.written).map_err(|e| at_leaf(a, leaf, e))?;
+        let size = size_attr(&ev.marks);
         (
             format!(
                 "        <type{size}>{ty}</type>\n{}",
@@ -725,7 +800,7 @@ fn leaf_items(ctx: &Ctx, id: usize, leaf: &Leaf, items: &mut Vec<Item>) -> Resul
                 notes: &gn.notes,
                 marks: &gn.marks,
                 dur: 0,
-                type_xml: format!("        <type>{}</type>\n", grace_type(gn, g.notes.len())),
+                type_xml: grace_type_xml(gn, g.notes.len()),
                 grace: Some("        <grace steal-time-previous=\"50\"/>\n".to_string()),
             };
             chord_xml(ctx, leaf, ev, &nc, &mut xml)?;
@@ -872,7 +947,9 @@ fn chord_xml(
         let mut attrs = String::new();
         if let Some(n) = note {
             let vel = a.velocity(r);
-            if vel.note != vel.mark {
+            let leaf = &a.leaves[nc.leaf];
+            let reader = a.reader_level_at(Analysis::home_staff(leaf.lane), leaf.bar, leaf.start);
+            if vel.note != reader {
                 let _ = write!(
                     attrs,
                     " dynamics=\"{}\"",
@@ -1128,6 +1205,24 @@ fn notations(
         if n.has(PitchMark::LetRing) {
             s.push_str("          <tied type=\"let-ring\"/>\n");
         }
+        for g in a.glissandi.iter().filter(|g| g.end == r) {
+            let (tag, line) = gliss_look(g.line);
+            let _ = writeln!(
+                s,
+                "          <{tag} line-type=\"{line}\" number=\"{}\" type=\"stop\"/>",
+                g.number
+            );
+        }
+        for g in a.glissandi.iter().filter(|g| g.start == r) {
+            let (tag, line) = gliss_look(g.line);
+            let text = matches!(g.line, GlissLine::WavyText | GlissLine::StraightText);
+            let body = if text { "gliss." } else { "" };
+            let _ = writeln!(
+                s,
+                "          <{tag} line-type=\"{line}\" number=\"{}\" type=\"start\">{body}</{tag}>",
+                g.number
+            );
+        }
     }
     if first {
         for sl in &a.slurs {
@@ -1158,13 +1253,21 @@ fn notations(
         }
     }
     let mut orn = String::new();
+    // Overlapping trill lines of the two staves need two numbers.
+    let wavy = match Analysis::home_staff(a.leaves[nc.leaf].lane) {
+        Staff::Upper => 1,
+        Staff::Lower => 2,
+    };
     if first {
         for m in nc.marks {
             match m {
                 TokMark::Ornament { kind, above, below } => {
                     let _ = writeln!(orn, "            {}", ornament_xml(*kind));
                     if *kind == OrnamentKind::TrillLine {
-                        orn.push_str("            <wavy-line type=\"start\" number=\"1\"/>\n");
+                        let _ = writeln!(
+                            orn,
+                            "            <wavy-line type=\"start\" number=\"{wavy}\"/>"
+                        );
                     }
                     if let Some(x) = above {
                         let _ = writeln!(
@@ -1192,8 +1295,18 @@ fn notations(
                 orn.push_str(&t);
             }
         }
-        if wavy_line_ends_here(a, r) {
-            orn.push_str("            <wavy-line type=\"stop\" number=\"1\"/>\n");
+        if a.trill_notes.iter().any(|(start, _)| *start == r) {
+            let _ = writeln!(
+                orn,
+                "            <wavy-line type=\"start\" number=\"{wavy}\"/>"
+            );
+        }
+        let lane_line_ends = a.trill_notes.iter().any(|(_, end)| *end == r);
+        if wavy_line_ends_here(a, r) || lane_line_ends {
+            let _ = writeln!(
+                orn,
+                "            <wavy-line type=\"stop\" number=\"{wavy}\"/>"
+            );
         }
     }
     if !orn.is_empty() {
@@ -1230,6 +1343,7 @@ fn notations(
                     Articulation::Tenuto => "<tenuto/>",
                     Articulation::Accent => "<accent/>",
                     Articulation::Marcato => "<strong-accent/>",
+                    Articulation::MarcatoDown => "<strong-accent type=\"down\"/>",
                 }),
                 _ => None,
             })
@@ -1294,6 +1408,19 @@ fn wavy_line_ends_here(a: &Analysis, r: NoteRef) -> bool {
 
 type Direction = (Item, Staff);
 
+fn size_attr(marks: &[TokMark]) -> &'static str {
+    if marks.contains(&TokMark::Small) {
+        " size=\"cue\""
+    } else {
+        ""
+    }
+}
+
+fn grace_type_xml(gn: &GraceNote, count: usize) -> String {
+    let size = size_attr(&gn.marks);
+    format!("        <type{size}>{}</type>\n", grace_type(gn, count))
+}
+
 fn placement(p: Option<Place>, default: Place) -> &'static str {
     match p.unwrap_or(default) {
         Place::Above => "above",
@@ -1339,16 +1466,38 @@ fn direction(
     }
 }
 
+// The lowest number that no open span of the same MusicXML element has. A span that ends where
+// another starts frees its number only in its own lane: another lane can be written first.
 fn span_number(a: &Analysis, span: &Span) -> usize {
-    let same_kind = |s: &Span| std::mem::discriminant(s.tok) == std::mem::discriminant(span.tok);
-    let st = a.abs(span.start.0, span.start.1);
-    let open = a
+    let element = |t: &Tok| match t {
+        Tok::Hairpin(..) => Some(0),
+        Tok::Text(x) if x.ext => Some(1),
+        Tok::Tempo(x) if x.ext => Some(1),
+        Tok::Ottava(_) => Some(2),
+        _ => None,
+    };
+    let Some(kind) = element(span.tok) else {
+        return 1;
+    };
+    let mut same: Vec<&Span> = a
         .spans
         .iter()
-        .filter(|s| same_kind(s) && s.lane != span.lane)
-        .filter(|s| a.abs(s.start.0, s.start.1) < st && a.abs(s.end.0, s.end.1) > st)
-        .count();
-    open + 1
+        .filter(|s| element(s.tok) == Some(kind))
+        .collect();
+    same.sort_by_key(|s| (a.abs(s.start.0, s.start.1), s.lane));
+    let mut open: Vec<(Frac, Lane, usize)> = Vec::new();
+    for s in same {
+        let start = a.abs(s.start.0, s.start.1);
+        open.retain(|(end, lane, _)| *end > start || (*end == start && *lane != s.lane));
+        let n = (1..)
+            .find(|n| open.iter().all(|(_, _, m)| m != n))
+            .unwrap_or(1);
+        if s.lane == span.lane && s.start == span.start {
+            return n;
+        }
+        open.push((a.abs(s.end.0, s.end.1), s.lane, n));
+    }
+    1
 }
 
 fn directions(ctx: &Ctx, b: usize) -> Result<Vec<Direction>, String> {
@@ -1358,6 +1507,9 @@ fn directions(ctx: &Ctx, b: usize) -> Result<Vec<Direction>, String> {
     let first_bar = *ctx.range.start();
     let last_bar = *ctx.range.end();
     let bar_end = a.bar_end(b);
+    // MusicXML readers pair a stop with an open span in document order: at one time, the stops
+    // of ending spans go before the starts of new ones.
+    let mut starts: Vec<(Direction, bool)> = Vec::new();
     for span in &a.spans {
         let starts_here = span.start.0 == b;
         let carried_in = b == first_bar && span.start.0 < b && span.end.0 >= b;
@@ -1375,7 +1527,8 @@ fn directions(ctx: &Ctx, b: usize) -> Result<Vec<Direction>, String> {
         let n = span_number(a, span);
         if starts_here || carried_in {
             if let Some(d) = span_start(ctx, b, span, staff, ctx.pos(b, start_t)?, n, carried_in) {
-                out.push((d, staff));
+                let later_dyn_lane = matches!(span.lane, Lane::Mark(_, MarkKind::Dyn, n) if n > 1);
+                starts.push(((d, staff), later_dyn_lane));
             }
         }
         if ends_here {
@@ -1384,6 +1537,10 @@ fn directions(ctx: &Ctx, b: usize) -> Result<Vec<Direction>, String> {
             }
         }
     }
+    // MusicXML readers keep the level of the last mark at a time; the first dynamics lane sets
+    // the level in pno, so its mark goes last.
+    starts.sort_by_key(|((d, _), later_dyn_lane)| (d.t, !later_dyn_lane));
+    out.extend(starts.into_iter().map(|(d, _)| d));
     if ctx.pedal == PedalMarks::Show {
         out.extend(pedal_directions(ctx, b)?);
     }
@@ -1436,9 +1593,14 @@ fn directions(ctx: &Ctx, b: usize) -> Result<Vec<Direction>, String> {
     Ok(out)
 }
 
-// The pedal marks of bar `b`, below the lower staff.
+// The pedal marks of bar `b`, below the lower staff (the only staff with staves=1).
 fn pedal_directions(ctx: &Ctx, b: usize) -> Result<Vec<Direction>, String> {
     let a = ctx.a;
+    let staff = if a.score.one_staff() {
+        Staff::Upper
+    } else {
+        Staff::Lower
+    };
     let first_bar = *ctx.range.start();
     let last_bar = *ctx.range.end();
     let bar_end = a.bar_end(b);
@@ -1452,13 +1614,13 @@ fn pedal_directions(ctx: &Ctx, b: usize) -> Result<Vec<Direction>, String> {
         out.push((
             direction(
                 0,
-                Staff::Lower,
+                staff,
                 "below",
                 &[format!("<pedal type=\"start\" {style}/>")],
                 None,
                 Layer::Staff,
             ),
-            Staff::Lower,
+            staff,
         ));
     }
     for p in a.pedals.iter().filter(|p| p.bar == b) {
@@ -1469,26 +1631,26 @@ fn pedal_directions(ctx: &Ctx, b: usize) -> Result<Vec<Direction>, String> {
         };
         let mut d = direction(
             ctx.pos(b, p.at)?,
-            Staff::Lower,
+            staff,
             "below",
             &[format!("<pedal type=\"{kind}\" {style}/>")],
             None,
             Layer::Staff,
         );
         d.order = if p.action == PedalAction::Stop { 0 } else { 1 };
-        out.push((d, Staff::Lower));
+        out.push((d, staff));
     }
     if b == last_bar && b + 1 < a.score.bars.len() && pedal_held_before(a, b + 1) {
         out.push((
             direction(
                 ctx.pos(b, bar_end)?,
-                Staff::Lower,
+                staff,
                 "below",
                 &[format!("<pedal type=\"stop\" {style}/>")],
                 None,
                 Layer::Staff,
             ),
-            Staff::Lower,
+            staff,
         ));
     }
     Ok(out)
@@ -1565,7 +1727,12 @@ fn span_start(
         Tok::Text(text) => {
             let mut types = Vec::new();
             if !carried {
-                types.push(format!("<words>{}</words>", esc(&text.text)));
+                let body = esc(&text.text);
+                types.push(match text.frame {
+                    TextFrame::None => format!("<words>{body}</words>"),
+                    TextFrame::Box => format!("<words enclosure=\"rectangle\">{body}</words>"),
+                    TextFrame::Rehearsal => format!("<rehearsal>{body}</rehearsal>"),
+                });
             }
             if text.ext {
                 types.push(format!("<dashes type=\"start\" number=\"{n}\"/>"));
@@ -1705,16 +1872,14 @@ fn span_stop(span: &Span, staff: Staff, t: i64, n: usize) -> Option<Item> {
         }
         _ => return None,
     };
-    let mut d = direction(
+    Some(direction(
         t,
         staff,
         span_place(span.tok, staff),
         &[ty],
         None,
         Layer::Staff,
-    );
-    d.order = 3;
-    Some(d)
+    ))
 }
 
 fn span_place(tok: &Tok, staff: Staff) -> &'static str {

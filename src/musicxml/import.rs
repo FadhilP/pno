@@ -26,7 +26,7 @@ pub fn import(xml: &str, keep: Keep) -> Result<Imported, String> {
     fix::slurs(&mut built, &mut rep);
     fix::mark_velocities(&mut built, &src.vel_lines, &mut rep);
     fix::note_velocities(&mut built, src.vel_lines.is_empty());
-    no_mark_off_the_grid(&built.score, &built.rounded)?;
+    nothing_off_the_grid(&built)?;
     let text = crate::fmt::format(built.score, crate::fmt::Fix::No)
         .map_err(|e| format!("internal: the import cannot write the file: {e}"))?;
     verify(&text)?;
@@ -36,28 +36,21 @@ pub fn import(xml: &str, keep: Keep) -> Result<Imported, String> {
     })
 }
 
-// A mark lane shows a time only on a slot of a plain cell or of one tuplet group (SPEC 3.3).
-// Voice lines can be off the grid in a bar with rounded tuplet lengths that do not add up.
-fn no_mark_off_the_grid(score: &crate::model::Score, rounded: &[bool]) -> Result<(), String> {
-    for (bi, bar) in score.bars.iter().enumerate() {
-        let rounded = rounded.get(bi).copied().unwrap_or(false);
+// A lane shows a time only on a slot of a plain cell or of one tuplet group (SPEC 3.3).
+fn nothing_off_the_grid(built: &build::Built) -> Result<(), String> {
+    for (bi, bar) in built.score.bars.iter().enumerate() {
+        let rounded = built.rounded.get(bi).copied().unwrap_or(false);
         for line in &bar.lines {
-            let voice = line.lane.is_voice();
-            if voice && !rounded {
-                continue;
-            }
             if crate::text::write::write_line(line.lane, &line.els, &bar.layout).is_ok() {
                 continue;
             }
-            let what = if voice {
-                "a tuplet whose rounded lengths do not add up"
-            } else {
-                "a mark at a time that no slot shows"
+            let what = match (line.lane.is_voice(), rounded) {
+                (true, true) => "a tuplet whose rounded lengths do not add up",
+                (true, false) => "a note or rest at a time that no slot or group shows",
+                (false, _) => "a mark at a time that no slot shows",
             };
-            return Err(read::stop(
-                &format!("{what} (bar {}, {})", bar.label, line.lane),
-                "",
-            ));
+            let number = built.numbers.get(bi).map_or("", String::as_str);
+            return Err(read::stop(&format!("{what} ({})", line.lane), number));
         }
     }
     Ok(())

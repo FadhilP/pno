@@ -16,13 +16,19 @@ pub enum Row {
     JumpText,
     RestPosition,
     TupletBracket,
+    TupletUnit,
     TextBracket,
     TempoStaves,
+    TempoSound,
     TableVelocity,
     CueElement,
     HiddenSize,
     PedalSignChange,
     PedalStaff,
+    JumpPlace,
+    DynOrder,
+    GraceSlash,
+    TiedNotPlayed,
     RoundedTuplets,
     Stems,
     Beams,
@@ -51,6 +57,12 @@ impl Row {
             Row::JumpText => "words of jump, sign and volta texts (by design)",
             Row::RestPosition => "the vertical position of rests (by design)",
             Row::TupletBracket => "the bracket of a tuplet (by design)",
+            Row::TupletUnit => {
+                "the unit note value of a tuplet; pno takes it from the length of the group (by design)"
+            }
+            Row::TempoSound => {
+                "a playback tempo that differs from its metronome mark; the mark sets the tempo (by design)"
+            }
             Row::TextBracket => "text lines with a bracket (by design)",
             Row::TempoStaves => {
                 "the staves that show a tempo mark (by design; pno shows it on the top staff only)"
@@ -64,7 +76,19 @@ impl Row {
                 "measures with tuplet lengths that the divisions round; pno writes the exact lengths (by design)"
             }
             Row::PedalStaff => {
-                "pedal marks on the upper staff; pno writes them below the lower staff (by design)"
+                "pedal marks on the upper staff or above the lower staff; pno writes them below the lower staff (by design)"
+            }
+            Row::DynOrder => {
+                "the order of two dynamic marks at one time (by design); the note velocities stay"
+            }
+            Row::GraceSlash => {
+                "a slash on only some grace notes of a group; pno slashes the group as its first note (by design)"
+            }
+            Row::TiedNotPlayed => {
+                "ties that are drawn but not played (<tied> with no <tie>); pno plays them (by design)"
+            }
+            Row::JumpPlace => {
+                "the place of jump texts; pno writes them above the upper staff (by design)"
             }
             Row::PedalSignChange => {
                 "a `Ped.` while the pedal is down (pno writes a pedal change) or a `*` with no pedal down (by design)"
@@ -87,6 +111,10 @@ pub struct Report {
 impl Report {
     pub fn drop(&mut self, row: Row) {
         self.drop_n(row, 1);
+    }
+
+    pub fn forget(&mut self, row: Row) {
+        self.counts.remove(&row);
     }
 
     pub fn drop_n(&mut self, row: Row, n: usize) {

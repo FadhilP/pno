@@ -2,9 +2,9 @@ use std::fmt::Write as _;
 
 use crate::frac::Frac;
 use crate::model::{
-    AccDisplay, ArpKind, Articulation, Bar, BarLayout, Clef, Dyn, El, ElKind, Event, Grace,
-    GroupHead, Hairpin, Head, Lane, Metronome, Note, OrnamentKind, Ottava, Pedal, PitchMark, Place,
-    Score, Slurs, Staff, Tempo, TempoMark, Tok, TokMark, TupletLook,
+    AccDisplay, ArpKind, Articulation, Bar, BarLayout, Clef, Dyn, El, ElKind, Event, GlissLine,
+    Grace, GroupHead, Hairpin, Head, Lane, Metronome, Note, OrnamentKind, Ottava, Pedal, PitchMark,
+    Place, Score, Slurs, Staff, Tempo, TempoMark, TextFrame, Tok, TokMark, TupletLook,
 };
 use crate::text::attr::{escape, fmt_num, fmt_signed};
 
@@ -73,8 +73,8 @@ fn has_content(els: &[El]) -> bool {
     })
 }
 
-const PLAIN_COUNTS: [i64; 6] = [1, 2, 4, 8, 16, 32];
-const DOTTED_COUNTS: [i64; 5] = [1, 3, 6, 12, 24];
+const PLAIN_COUNTS: [i64; 7] = [1, 2, 4, 8, 16, 32, 64];
+const DOTTED_COUNTS: [i64; 6] = [1, 3, 6, 12, 24, 48];
 
 pub fn cell_counts(cell: Frac) -> &'static [i64] {
     if cell.is_pow2() {
@@ -363,13 +363,25 @@ pub fn tok_text(lane: Lane, t: &Tok) -> String {
             };
             format!("{s}{}", place_text(lane, *p))
         }
-        Tok::Text(t) => format!("{}{}", quote(&t.text), place_text(lane, t.place)),
+        Tok::Text(t) => {
+            let frame = match t.frame {
+                TextFrame::None => "",
+                TextFrame::Box => ":box",
+                TextFrame::Rehearsal => ":mark",
+            };
+            format!("{}{frame}{}", quote(&t.text), place_text(lane, t.place))
+        }
         Tok::Tempo(t) => tempo_text(lane, t),
+        Tok::Trill => "tr".into(),
         Tok::Clef(c) => match c {
             Clef::Treble => "treble",
             Clef::Bass => "bass",
             Clef::Alto => "alto",
             Clef::Tenor => "tenor",
+            Clef::Treble8va => "treble8va",
+            Clef::Treble8vb => "treble8vb",
+            Clef::Bass8va => "bass8va",
+            Clef::Bass8vb => "bass8vb",
         }
         .into(),
         Tok::Ottava(o) => match o {
@@ -441,6 +453,7 @@ pub fn tok_mark_text(m: &TokMark) -> String {
             Articulation::Tenuto => "ten",
             Articulation::Accent => "ac",
             Articulation::Marcato => "marc",
+            Articulation::MarcatoDown => "marcd",
         },
         TokMark::Fermata { inverted: false } => "ferm",
         TokMark::Fermata { inverted: true } => "fermi",
@@ -495,6 +508,10 @@ fn pitch_mark_text(m: &PitchMark) -> String {
         PitchMark::TieLater => "^t".into(),
         PitchMark::Hide => "^hide".into(),
         PitchMark::LetRing => "^lv".into(),
+        PitchMark::Gliss(GlissLine::Wavy) => "^gl".into(),
+        PitchMark::Gliss(GlissLine::WavyText) => "^glt".into(),
+        PitchMark::Gliss(GlissLine::Straight) => "^sl".into(),
+        PitchMark::Gliss(GlissLine::StraightText) => "^slt".into(),
         PitchMark::Vel(v) => format!("^v{}", fmt_signed(*v)),
         PitchMark::Mute => "^v0".into(),
         PitchMark::Attack(v) => format!("^a{}", fmt_signed(*v)),

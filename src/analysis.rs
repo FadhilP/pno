@@ -3,8 +3,9 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use crate::diag::Diag;
 use crate::frac::{Frac, NoteValue};
 use crate::model::{
-    Attr, El, ElKind, Event, GroupHead, Head, Key, Lane, MarkKind, Note, Ottava, Pedal, PedalStyle,
-    PhraseMark, Pitch, PitchMark, Place, Score, Staff, Tok, TupletLook,
+    Attr, El, ElKind, Event, GlissLine, GroupHead, Head, Key, Lane, MarkKind, Note, OrnamentKind,
+    Ottava, Pedal, PedalStyle, PhraseMark, Pitch, PitchMark, Place, Score, Staff, Tok, TokMark,
+    TupletLook,
 };
 use crate::text::write::default_ratio;
 
@@ -95,6 +96,13 @@ pub struct SlurPair {
     pub above: Option<bool>,
 }
 
+pub struct GlissPair {
+    pub start: NoteRef,
+    pub end: NoteRef,
+    pub line: GlissLine,
+    pub number: u32,
+}
+
 pub struct Analysis<'a> {
     pub score: &'a Score,
     pub bars: Vec<BarInfo>,
@@ -103,7 +111,10 @@ pub struct Analysis<'a> {
     pub lane_leaves: BTreeMap<Lane, Vec<usize>>,
     pub tie_starts: HashMap<NoteRef, NoteRef>,
     pub slurs: Vec<SlurPair>,
+    pub glissandi: Vec<GlissPair>,
     pub spans: Vec<Span<'a>>,
+    // The first and the last note of each trill line of a `trl` lane.
+    pub trill_notes: Vec<(NoteRef, NoteRef)>,
     pub pedals: Vec<PedalEvent>,
     pub pedal_style: PedalStyle,
     pub signs: HashSet<NoteRef>,
@@ -160,7 +171,9 @@ impl<'a> Analysis<'a> {
             lane_leaves: BTreeMap::new(),
             tie_starts: HashMap::new(),
             slurs: Vec::new(),
+            glissandi: Vec::new(),
             spans: Vec::new(),
+            trill_notes: Vec::new(),
             pedals: Vec::new(),
             pedal_style: PedalStyle::Line,
             signs: HashSet::new(),
@@ -172,7 +185,9 @@ impl<'a> Analysis<'a> {
         a.check_values();
         a.resolve_ties();
         a.pair_slurs();
+        a.pair_glissandi();
         a.collect_spans();
+        a.trill_notes();
         a.collect_pedals();
         a.collect_pauses();
         a.signs = crate::accidental::default_signs(&a);
@@ -455,6 +470,83 @@ impl<'a> Analysis<'a> {
             part: Part::Main,
             note: n,
         })
+    }
+
+    // A glissando ends on the next chord of its lane (SPEC 3.7).
+    fn pair_glissandi(&mut self) {
+        let by_pitch = |notes: &[crate::model::Note]| {
+            let mut order: Vec<usize> = (0..notes.len()).collect();
+            order.sort_by_key(|&i| notes[i].pitch.midi());
+            order
+        };
+        let mut errors = Vec::new();
+        for ids in self.lane_leaves.values() {
+            for (k, &id) in ids.iter().enumerate() {
+                let Some(ev) = self.leaves[id].event() else {
+                    continue;
+                };
+                let starts: Vec<(usize, GlissLine)> = by_pitch(ev.notes())
+                    .into_iter()
+                    .filter_map(|i| {
+                        ev.notes()[i].marks.iter().find_map(|m| match m {
+                            PitchMark::Gliss(line) => Some((i, *line)),
+                            _ => None,
+                        })
+                    })
+                    .collect();
+                if starts.is_empty() {
+                    continue;
+                }
+                let next = ids
+                    .get(k + 1)
+                    .and_then(|&n| self.leaves[n].event().map(|e| (n, e)));
+                let fits = |o: &Vec<usize>| starts.len() == 1 || o.len() == starts.len();
+                let ends = next
+                    .map(|(n, e)| (n, e, by_pitch(e.notes())))
+                    .filter(|(_, _, o)| !o.is_empty() && fits(o));
+                let Some((end_leaf, end_ev, ends)) = ends else {
+                    let leaf = &self.leaves[id];
+                    let loc = at(
+                        self.score,
+                        leaf.bar,
+                        leaf.lane,
+                        self.cell(leaf.bar, leaf.start),
+                    );
+                    errors.push(Diag::error(
+                        leaf.src,
+                        loc,
+                        "a glissando ends on the next chord of this lane: one glissando on any chord, several on a chord with one pitch for each",
+                    ));
+                    continue;
+                };
+                // One glissando ends on the outer pitch in its direction.
+                let up = |i: usize| {
+                    end_ev.notes()[ends[ends.len() - 1]].pitch.midi() >= ev.notes()[i].pitch.midi()
+                };
+                for (j, (note, line)) in starts.iter().enumerate() {
+                    let end = match starts.len() {
+                        1 if up(*note) => ends[ends.len() - 1],
+                        1 => ends[0],
+                        _ => ends[j],
+                    };
+                    self.glissandi.push(GlissPair {
+                        start: NoteRef {
+                            leaf: id,
+                            part: Part::Main,
+                            note: *note,
+                        },
+                        end: NoteRef {
+                            leaf: end_leaf,
+                            part: Part::Main,
+                            note: end,
+                        },
+                        line: *line,
+                        number: j as u32 + 1,
+                    });
+                }
+            }
+        }
+        self.diags.extend(errors);
     }
 
     fn resolve_ties(&mut self) {
@@ -754,19 +846,21 @@ impl<'a> Analysis<'a> {
             let leaf = &self.leaves[r.leaf];
             (leaf.bar, leaf.lane.order(), r.leaf, r.part)
         };
+        // A slur from a later lane to an earlier one is written stop first; it keeps its number from
+        // the stop to the start, so that readers pair the stop with the start that follows it.
         let mut pairs: Vec<_> = pairs
             .into_iter()
-            .map(|(s, e, above)| (doc(s), doc(e), s, e, above))
+            .map(|(s, e, above)| (doc(s).min(doc(e)), doc(s).max(doc(e)), s, e, above))
             .collect();
         pairs.sort_by_key(|p| (p.0, p.1));
         let mut open = Vec::new();
-        for (start_at, end_at, s, e, above) in pairs {
+        for (first_at, last_at, s, e, above) in pairs {
             // A stop on the start note is written before the start: `)(`.
-            open.retain(|(end, _)| *end > start_at);
+            open.retain(|(end, _)| *end > first_at);
             let number = (1..)
                 .find(|n| open.iter().all(|(_, m)| m != n))
                 .unwrap_or(1);
-            open.push((end_at, number));
+            open.push((last_at, number));
             self.slurs.push(SlurPair {
                 start: s,
                 end: e,
@@ -793,6 +887,97 @@ impl<'a> Analysis<'a> {
             .map_or(self.score.bars[bar].src, |l| l.src)
     }
 
+    // A trill line starts on a note of its staff at its start and stops on a note of its staff that
+    // ends at its end: in the lane of the first note if one does.
+    fn trill_notes(&mut self) {
+        type BarTime = (usize, Frac);
+        let lines: Vec<(Staff, BarTime, BarTime)> = self
+            .spans
+            .iter()
+            .filter_map(|s| match (s.lane, s.tok) {
+                (Lane::Mark(staff, MarkKind::Trill, _), Tok::Trill) => {
+                    Some((staff, s.start, s.end))
+                }
+                _ => None,
+            })
+            .collect();
+        for (staff, start, end) in lines {
+            let abs = |b: usize, t: Frac| self.bars[b].start + t;
+            let notes_of = |lane: Lane| -> Vec<usize> {
+                self.lane_leaves
+                    .get(&lane)
+                    .cloned()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|&id| {
+                        self.leaves[id]
+                            .event()
+                            .is_some_and(|e| !e.notes().is_empty())
+                    })
+                    .collect()
+            };
+            let lanes: Vec<Lane> = (1..=4).map(|n| Lane::Voice(staff, n)).collect();
+            let at_start: Vec<usize> = lanes
+                .iter()
+                .flat_map(|&l| notes_of(l))
+                .filter(|&id| {
+                    let leaf = &self.leaves[id];
+                    abs(leaf.bar, leaf.start) == abs(start.0, start.1)
+                })
+                .collect();
+            let trilled = |id: &&usize| {
+                self.leaves[**id].event().is_some_and(|e| {
+                    e.marks.iter().any(|m| {
+                        matches!(
+                            m,
+                            TokMark::Ornament {
+                                kind: OrnamentKind::Trill,
+                                ..
+                            }
+                        )
+                    })
+                })
+            };
+            let first = at_start.iter().find(trilled).or(at_start.first()).copied();
+            let Some(first) = first else {
+                let loc = at(
+                    self.score,
+                    start.0,
+                    Lane::Mark(staff, MarkKind::Trill, 1),
+                    self.cell(start.0, start.1),
+                );
+                let src = self.src_of(start.0, Lane::Mark(staff, MarkKind::Trill, 1));
+                self.error(src, loc, "a trill line starts where its staff has no note");
+                continue;
+            };
+            let to = abs(end.0, end.1);
+            let ends_there = |id: &usize| {
+                let leaf = &self.leaves[*id];
+                abs(leaf.bar, leaf.start + leaf.dur) == to
+            };
+            let own = self.leaves[first].lane;
+            let last = std::iter::once(own)
+                .chain(lanes.iter().copied().filter(|l| *l != own))
+                .find_map(|l| notes_of(l).into_iter().find(ends_there))
+                .or_else(|| {
+                    notes_of(own)
+                        .into_iter()
+                        .take_while(|id| {
+                            let leaf = &self.leaves[*id];
+                            abs(leaf.bar, leaf.start) < to
+                        })
+                        .last()
+                })
+                .unwrap_or(first);
+            let main = |leaf: usize| NoteRef {
+                leaf,
+                part: Part::Main,
+                note: 0,
+            };
+            self.trill_notes.push((main(first), main(last)));
+        }
+    }
+
     fn collect_spans(&mut self) {
         let mut lanes: Vec<Lane> = Vec::new();
         for bar in &self.score.bars {
@@ -814,6 +999,10 @@ impl<'a> Analysis<'a> {
                 };
                 let els = flatten(els);
                 for (start, end, tok) in els {
+                    // An `x` is outside the time of the bar: a span goes on across it.
+                    if *tok == Tok::Gap {
+                        continue;
+                    }
                     if *tok == Tok::Cont {
                         match &mut open {
                             Some(s) => s.end = (b, end),
@@ -828,7 +1017,8 @@ impl<'a> Analysis<'a> {
                     if let Some(s) = open.take() {
                         self.spans.push(s);
                     }
-                    let spans = matches!(tok, Tok::Hairpin(..) | Tok::Ottava(_)) || tok.extended();
+                    let spans = matches!(tok, Tok::Hairpin(..) | Tok::Ottava(_) | Tok::Trill)
+                        || tok.extended();
                     let span = Span {
                         lane,
                         tok,
@@ -969,7 +1159,9 @@ impl<'a> Analysis<'a> {
         })
     }
 
-    fn mark_at(&self, staff: Staff, t: Frac) -> Option<LevelFrom> {
+    // `slot`: a momentary mark sounds for its slot, as pno plays it; with no `slot`, only at its
+    // moment, as MusicXML readers play it.
+    fn mark_at(&self, staff: Staff, t: Frac, slot: bool) -> Option<LevelFrom> {
         let dyns: Vec<(Frac, Frac, Staff, LevelFrom)> = self
             .spans
             .iter()
@@ -1004,10 +1196,16 @@ impl<'a> Analysis<'a> {
             };
             if !mark.is_momentary() {
                 base = Some(*from);
-            } else if t < *end {
+            } else if t < *end && (slot || *start == t) {
                 return Some(*from);
-            } else {
+            } else if slot {
                 base = mark.after().map(LevelFrom::Mark).or(base);
+            } else {
+                // MusicXML readers play the level after `fp` at the table velocity of `p`.
+                base = mark
+                    .after()
+                    .map(|m| LevelFrom::Text(m.default_velocity()))
+                    .or(base);
             }
         }
         base
@@ -1022,7 +1220,16 @@ impl<'a> Analysis<'a> {
     }
 
     pub fn level_at(&self, staff: Staff, bar: usize, t: Frac) -> f64 {
-        match self.mark_at(staff, self.abs(bar, t)) {
+        self.level(staff, bar, t, true)
+    }
+
+    // The level a MusicXML reader gives a note from the dynamic marks alone.
+    pub fn reader_level_at(&self, staff: Staff, bar: usize, t: Frac) -> f64 {
+        self.level(staff, bar, t, false)
+    }
+
+    fn level(&self, staff: Staff, bar: usize, t: Frac, slot: bool) -> f64 {
+        match self.mark_at(staff, self.abs(bar, t), slot) {
             Some(LevelFrom::Mark(m)) => self.mark_velocity(bar, m),
             Some(LevelFrom::Text(v)) => v,
             None => DEFAULT_VELOCITY,

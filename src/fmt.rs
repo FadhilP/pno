@@ -318,8 +318,12 @@ fn piece(ev: &Event, k: usize, last: usize) -> Event {
             e.slurs.ends.clear();
             if let Head::Chord(notes) = &mut e.head {
                 for n in notes {
-                    n.marks
-                        .retain(|m| !matches!(m, PitchMark::TieLater | PitchMark::LetRing));
+                    n.marks.retain(|m| {
+                        !matches!(
+                            m,
+                            PitchMark::TieLater | PitchMark::LetRing | PitchMark::Gliss(_)
+                        )
+                    });
                 }
             }
         }
@@ -342,7 +346,9 @@ fn piece(ev: &Event, k: usize, last: usize) -> Event {
                             PitchMark::CrossStaff(_) | PitchMark::TieUp | PitchMark::TieDown => {
                                 true
                             }
-                            PitchMark::TieLater | PitchMark::LetRing => is_last,
+                            PitchMark::TieLater | PitchMark::LetRing | PitchMark::Gliss(_) => {
+                                is_last
+                            }
                             _ => false,
                         })
                         .collect(),

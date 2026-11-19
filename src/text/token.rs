@@ -1,7 +1,8 @@
 use crate::model::{
-    AccDisplay, ArpKind, Articulation, Clef, Dyn, DynMark, DynText, Event, Grace, GraceNote,
-    Hairpin, Head, Lane, MarkKind, Metronome, Note, OrnamentKind, Ottava, Pedal, PhraseMark, Pitch,
-    PitchMark, Place, SlurStart, Slurs, Staff, Tempo, TempoMark, Text, Tok, TokMark,
+    AccDisplay, ArpKind, Articulation, Clef, Dyn, DynMark, DynText, Event, GlissLine, Grace,
+    GraceNote, Hairpin, Head, Lane, MarkKind, Metronome, Note, OrnamentKind, Ottava, Pedal,
+    PhraseMark, Pitch, PitchMark, Place, SlurStart, Slurs, Staff, Tempo, TempoMark, Text,
+    TextFrame, Tok, TokMark,
 };
 
 #[derive(Debug)]
@@ -42,23 +43,35 @@ pub fn parse_word(lane: Lane, w: &str) -> Result<Word, String> {
             MarkKind::Text => {
                 let (body, place) = split_place(w)?;
                 let (text, rest) = quoted(body)?;
-                if !rest.is_empty() {
-                    return Err(format!("unexpected `{rest}` after the text"));
-                }
+                let frame = match rest {
+                    "" => TextFrame::None,
+                    ":box" => TextFrame::Box,
+                    ":mark" => TextFrame::Rehearsal,
+                    _ => return Err(format!("unexpected `{rest}` after the text")),
+                };
                 Tok::Text(Text {
                     text,
                     ext: false,
                     place,
+                    frame,
                 })
             }
+            MarkKind::Trill => match w {
+                "tr" => Tok::Trill,
+                _ => return Err(format!("`{w}` is not a trill line mark. Use tr, - or _")),
+            },
             MarkKind::Clef => Tok::Clef(match w {
                 "treble" => Clef::Treble,
                 "bass" => Clef::Bass,
                 "alto" => Clef::Alto,
                 "tenor" => Clef::Tenor,
+                "treble8va" => Clef::Treble8va,
+                "treble8vb" => Clef::Treble8vb,
+                "bass8va" => Clef::Bass8va,
+                "bass8vb" => Clef::Bass8vb,
                 _ => {
                     return Err(format!(
-                        "`{w}` is not a clef. Use treble, bass, alto or tenor"
+                        "`{w}` is not a clef. Use treble, bass, alto, tenor, treble8va, treble8vb, bass8va or bass8vb"
                     ));
                 }
             }),
@@ -435,6 +448,10 @@ fn pitch_mark(c: &mut Cursor) -> Result<PitchMark, String> {
         "td" => PitchMark::TieDown,
         "hide" => PitchMark::Hide,
         "lv" => PitchMark::LetRing,
+        "gl" => PitchMark::Gliss(GlissLine::Wavy),
+        "glt" => PitchMark::Gliss(GlissLine::WavyText),
+        "sl" => PitchMark::Gliss(GlissLine::Straight),
+        "slt" => PitchMark::Gliss(GlissLine::StraightText),
         _ => return Err(format!("`^{name}` is not a pitch mark")),
     };
     Ok(mark)
@@ -480,6 +497,7 @@ fn tok_mark(name: &str) -> Result<TokMark, String> {
         "ten" => TokMark::Art(Articulation::Tenuto),
         "ac" => TokMark::Art(Articulation::Accent),
         "marc" => TokMark::Art(Articulation::Marcato),
+        "marcd" => TokMark::Art(Articulation::MarcatoDown),
         "ferm" => TokMark::Fermata { inverted: false },
         "fermi" => TokMark::Fermata { inverted: true },
         "arp" => TokMark::Arp(ArpKind::Plain),

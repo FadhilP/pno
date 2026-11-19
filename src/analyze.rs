@@ -409,7 +409,12 @@ fn repeats(score: &Score, bars: &[usize], out: &mut String) {
             let text = hand_text(score, bar, hand);
             (0..bar).find(|b| hand_text(score, *b, hand) == text)
         };
-        match (same(Staff::Upper), same(Staff::Lower)) {
+        let lower = if score.one_staff() {
+            same(Staff::Upper)
+        } else {
+            same(Staff::Lower)
+        };
+        match (same(Staff::Upper), lower) {
             (Some(r), Some(l)) if r == l => {
                 let _ = writeln!(out, "{label} = {}", score.bars[r].label);
                 none = false;

@@ -45,7 +45,25 @@ pub fn check(score: &Score, parse_diags: &[Diag]) -> Vec<Diag> {
                 ),
             ));
         }
-        for staff in [Staff::Upper, Staff::Lower] {
+        if a.score.one_staff() {
+            for l in bar
+                .lines
+                .iter()
+                .filter(|l| l.lane.staff() == Some(Staff::Lower) && l.lane != Lane::Ped)
+            {
+                diags.push(Diag::error(
+                    l.src,
+                    format!("{} {}", bar.label, l.lane),
+                    "this score has one staff (staves=1), so it has no lh lanes",
+                ));
+            }
+        }
+        let staves: &[Staff] = if a.score.one_staff() {
+            &[Staff::Upper]
+        } else {
+            &[Staff::Upper, Staff::Lower]
+        };
+        for &staff in staves {
             let lane = Lane::Voice(staff, 1);
             let has = bar.lines.iter().any(|l| l.lane == lane);
             let failed = parse_diags

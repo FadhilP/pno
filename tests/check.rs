@@ -40,7 +40,7 @@ fn invalid_inputs_give_located_errors() {
         (
             "three_slots",
             format!("1 rh | C5 D5 E5 | D5 | E5 | F5 |\n1 lh {R}"),
-            "1 rh cell 1: 3 slots. Use 1, 2, 4, 8, 16 or 32 slots, or mark a tuplet",
+            "1 rh cell 1: 3 slots. Use 1, 2, 4, 8, 16, 32 or 64 slots, or mark a tuplet",
         ),
         (
             "bad_run",
@@ -198,4 +198,16 @@ fn bar_range_limits_the_report_but_not_the_result() {
     let run = pno(&["check", path(&f), "1-2"]);
     assert_eq!(run.code, 1, "{}", run.stdout);
     assert!(run.stdout.contains("error"), "{}", run.stdout);
+}
+
+#[test]
+fn every_key_name_passes_check() {
+    // `F#` and `C#` end in `#` like the sign count `6#`.
+    for key in ["Cb", "F", "F#", "C#", "Abm", "D#m", "A#m", "6#", "7b", "0"] {
+        let run = check_text(
+            "key",
+            &format!("@ key={key}\n\n1 rh | C5 | - | - | - |\n1 lh {R}"),
+        );
+        assert_eq!(run.code, 0, "key={key}: {}{}", run.stdout, run.stderr);
+    }
 }
