@@ -178,12 +178,13 @@ Playback data uses the same rule as presentation: the file stores a value only w
 
 ### Velocity
 
-The velocity of a note is the sum of three levels:
+The velocity of a note is the sum of four levels:
 
 | Level | Syntax | Default (not stored) |
 |---|---|---|
 | The dynamic mark in effect | `@ vel.p=52` sets the velocity of the `p` marks: in the header for the full piece, or with a bar number from that bar until the next `vel.p=`. | The table below. |
 | The voice | `4 @ vel.rh2=-15`: an offset for the lane `rh2`, from that bar until the next `vel.rh2=`. | 0 |
+| The voicing | `30 @ voicing.rh=-12`: an offset for each note of a chord in the lane `rh` but its main note, from that bar until the next `voicing.rh=`. | 0 |
 | The note | `:v+8` on the token: `E5:v+8`, `E5+A5:v-12`. When the pitches of a chord differ, `^v` on each pitch that has an offset: `C4+E4^v-20+G4^v-20`. | 0 |
 
 **Level of the dynamic marks:**
@@ -199,17 +200,19 @@ The velocity of a note is the sum of three levels:
 
 - **Range of a voice offset:** `@ vel.rh=+10` in the header applies to the full piece. With a bar number it applies from that bar. `vel.rh2=0` ends an offset.
 - **One form:** `:v` when all pitches of the token have the same offset (also for one note), `^v` if not. Never write the two on one token. A note offset of 0 is not written.
+- **Voicing:** the main note of a chord is the pitch with `^m` (`E4+G4^m+C5`), else the top pitch in an upper-staff lane and the bottom pitch in a lower-staff lane. The other pitches of the chord get the voicing offset of the lane, and a pitch an octave or more from the main note with the same name gets half of it. A note alone has no voicing offset. A chord has one `^m` at most; it is an error on two pitches. Range and end as for `vel.rh=`.
 - **Silent note:** `:v0` or `^v0`, with no sign, is the only absolute value: the note is drawn and does not sound (MusicXML `dynamics="0"`). Levels and offsets do not apply to it.
 - **Unit:** MIDI velocity. A sum that is not in the range 1 to 127 is an error (a `v0` note has no sum).
 
 **MusicXML:**
 
 - **Conversion:** MusicXML stores a percentage of velocity 90, so `dynamics="35.56"` is velocity 32. The conversion is exact in both directions for each whole velocity. A source value that is not a whole velocity gives an offset with decimals.
-- **What the export writes:** the velocity of each dynamic mark, and the velocity of a note only when its sum differs from the level of the mark in effect. It writes the `<miscellaneous>` field only when the file has `vel.` lines.
+- **What the export writes:** the velocity of each dynamic mark, and the velocity of a note only when its sum differs from the level of the mark in effect. It writes the `<miscellaneous>` field only when the file has `vel.` or `voicing.` lines.
 - **MusicXML to `pno` and back** gives the same velocity for each mark and each note, because the sum is the same number. The import report lists what the format does not keep.
 - **No velocity in the source:** a dynamic mark with no velocity has the table velocity, and a note with no velocity of its own has the level of that mark. The import report gives the count.
-- **`pno` to MusicXML and back:** MusicXML has a velocity for each mark and each note, but no place for a voice offset. So `pno export` also writes the `vel.` lines into the `<miscellaneous>` block of the MusicXML file, which is the standard place for the data of a program.
-  - The import reads them and gives the same `vel.` lines back. A note that changed in a different program gets a new note offset.
+- **`pno` to MusicXML and back:** MusicXML has a velocity for each mark and each note, but no place for a voice offset. So `pno export` also writes the `vel.` and `voicing.` lines into the `<miscellaneous>` block of the MusicXML file, which is the standard place for the data of a program.
+  - The import reads them and gives the same `vel.` and `voicing.` lines back. A note that changed in a different program gets a new note offset.
+  - MusicXML has no place for `^m`: where `^m` is not on the default main note, the import gives `^v` offsets with the same sound.
   - Each line is a field with its own name (`pno-vel-1`, `pno-vel-2`, …), because MuseScore keeps only one field for each name.
   - MuseScore 4.7.6 keeps the fields when it converts a MusicXML file with its command line, and when it saves the file as `.mscz` first.
 - **A file with no such block** (from a different program, or if a program removed the block; the levels cannot return then): the import uses a fixed rule.
@@ -297,6 +300,7 @@ The `phrase` lane gives the phrases that `pno export --phrase` shapes: `5 phrase
 | `^lv` | A laissez-vibrer tie: a tie with no end note. |
 | `^gl`, `^sl` | A glissando from this pitch to the next chord of the lane: `^gl` is a wavy line, `^sl` a straight line. `^glt` and `^slt` add the text "gliss.". One glissando ends on the outer pitch of that chord in its direction: the top pitch when it goes up, the bottom pitch when it goes down. Several glissandi on one chord end on a chord with one pitch for each, from low to high. |
 | `^v`, `^a`, `^r` | Playback data (section 3.5). The velocity offset of a full token is `:v`. |
+| `^m` | The main note of the chord for the voicing offset (section 3.5). |
 
 ### Marks on the full token (`:`)
 
@@ -361,6 +365,7 @@ Header lines have no bar number and one attribute each. A bar can have one `@` l
 | `staves=` | `1`: the score has only the upper staff, so it has no `lh` lanes; the `ped` lane is below that staff. With no `staves=`, a score has two staves. Header only. |
 | `vel.p=`, `vel.mf=` and so on | The velocity of that dynamic mark (section 3.5). Header, or from its bar. |
 | `vel.rh=`, `vel.rh2=`, `vel.lh=` and so on | The velocity offset of that voice lane, with a sign (section 3.5). From its bar. |
+| `voicing.rh=`, `voicing.lh=` and so on | The offset of the chord notes but the main note in that voice lane, with a sign (section 3.5). From its bar. |
 | `program=`, `volume=`, `pan=` | Playback (section 3.5). Header only. |
 
 ### Header texts from MusicXML
@@ -408,8 +413,8 @@ Each symbol has one meaning in its position, so the parser needs no context from
 | `=` | Attribute value. Tempo value in the `tempo` lane. The level of a dynamic text in the `dyn` lane. |
 | `"..."` | Text. |
 | `#`, `b` | Sharp and flat in a pitch (`F#4`, `Bb2`), in a key with no mode (`key=2#`, `key=1b`), and after an ornament name (`:tr#`). After an ornament name, `n` is a natural. In a bar label, `b` is the second part of a split bar (`8b`). |
-| `+` | Joins the pitches of a chord (a pitch follows). After `^a`, `^r`, `^v`, `:v` or `vel.rh=`: a positive offset (a digit follows). Joins the numbers of an additive time signature. |
-| `-` | Voice lane: the note or rest continues, or the group before it continues. Span lane: the span continues. A part of some names (`dc-fine`, `pedal-style`). After `^a`, `^r`, `^v`, `:v` or `vel.rh=`: a negative offset. |
+| `+` | Joins the pitches of a chord (a pitch follows). After `^a`, `^r`, `^v`, `:v`, `vel.rh=` or `voicing.rh=`: a positive offset (a digit follows). Joins the numbers of an additive time signature. |
+| `-` | Voice lane: the note or rest continues, or the group before it continues. Span lane: the span continues. A part of some names (`dc-fine`, `pedal-style`). After `^a`, `^r`, `^v`, `:v`, `vel.rh=` or `voicing.rh=`: a negative offset. |
 | `~` | Prefix of a tied pitch. |
 | `r`, `R` | Rest, whole-bar rest. |
 | `_` | Nothing at this time. Before a pitch: the note is not drawn. Before a metronome mark in the `tempo` lane: the mark is not shown (`_e=110`). |

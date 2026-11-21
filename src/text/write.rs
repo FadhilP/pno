@@ -514,6 +514,7 @@ fn pitch_mark_text(m: &PitchMark) -> String {
         PitchMark::Gliss(GlissLine::StraightText) => "^slt".into(),
         PitchMark::Vel(v) => format!("^v{}", fmt_signed(*v)),
         PitchMark::Mute => "^v0".into(),
+        PitchMark::Main => "^m".into(),
         PitchMark::Attack(v) => format!("^a{}", fmt_signed(*v)),
         PitchMark::Release(v) => format!("^r{}", fmt_signed(*v)),
         PitchMark::TieUp => "^tu".into(),

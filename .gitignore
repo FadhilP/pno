@@ -1,2 +1,4 @@
 /target
 /tools
+# The user's own arranging defaults (from scores they own); local only
+/skill/audio-to-pno/style-guide.md

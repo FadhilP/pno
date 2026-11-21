@@ -55,8 +55,18 @@ pub struct Performance {
     pub volume: Option<u8>,
     pub pan: Option<u8>,
     pub end: f64,
-    // The start of each played bar.
-    pub bars: Vec<f64>,
+    pub bars: Vec<PlayedBar>,
+}
+
+pub struct PlayedBar {
+    pub bar: usize,
+    pub start: f64,
+}
+
+// The written onsets of a bar in ticks from its start, of notes and rests of all voices.
+pub struct BarOnsets {
+    pub onsets: Vec<f64>,
+    pub length: f64,
 }
 
 pub struct Played {
@@ -316,7 +326,13 @@ pub fn perform(a: &Analysis, opts: &Options) -> Result<Performance, String> {
         notes,
         pedal,
         end: last + tail,
-        bars: order.iter().map(|i| i.start + lead).collect(),
+        bars: order
+            .iter()
+            .map(|i| PlayedBar {
+                bar: i.bar,
+                start: i.start + lead,
+            })
+            .collect(),
         tempo: tempo.points.iter().map(|&(t, q)| (later(t), q)).collect(),
         meters: meters(a.score, &order)
             .into_iter()
@@ -326,6 +342,27 @@ pub fn perform(a: &Analysis, opts: &Options) -> Result<Performance, String> {
         volume,
         pan,
     })
+}
+
+pub fn bar_onsets(a: &Analysis) -> Vec<BarOnsets> {
+    let mut out: Vec<BarOnsets> = a
+        .score
+        .bars
+        .iter()
+        .map(|b| BarOnsets {
+            onsets: Vec::new(),
+            length: ticks(b.layout.length()),
+        })
+        .collect();
+    for leaf in a.leaves.iter().filter(|l| l.event().is_some()) {
+        let lead = a.score.bars[leaf.bar].layout.lead;
+        out[leaf.bar].onsets.push(ticks(leaf.start - lead));
+    }
+    for bar in &mut out {
+        bar.onsets.sort_by(f64::total_cmp);
+        bar.onsets.dedup();
+    }
+    out
 }
 
 fn instances(score: &Score) -> Vec<Instance> {

@@ -49,6 +49,8 @@ A format 1 file with three tracks: a conductor track (tempo and time signatures)
 
 `render` draws each frame (falling notes, a keyboard with the held keys lit, bar lines, the pedal) and pipes raw RGB frames to ffmpeg (H.264). `mux` adds the audio (AAC), delayed by the lead-in of the video. The audio and the frames render at the same time in two threads.
 
+With `--sheet`, `sheet.rs` adds a band with the score. One MuseScore run (a job file) writes the measure boxes (`.mpos`), the note columns (`.spos`) and the pages (PNG) of the MusicXML without a title frame. Each system is cut from its page (from the middle of the gap above to the middle of the gap below), kept as ink alpha, and shrunk to fit the band. The band draws black ink on white paper: opaque below the keyboard, at 40 % opacity at the top, where it lies over the falling notes. The cursor follows the performance, not MuseScore's timing: each played bar maps to its written measure, and the written onsets of the bar (`perform::bar_onsets`) map to the note columns of the measure, in order. The times come from the tempo map of the performance, so rubato, fermatas, repeats and `--bars` move the cursor too. If the number of onsets and columns of a bar is not the same, the cursor moves in a line across that bar; other bars are not changed (`sheet::anchors`).
+
 ## MusicXML (`musicxml.rs`, `musicxml/`)
 
 - **Export.** `musicxml::export(analysis, scope, pedal_marks)` writes one measure for each bar: attributes, notes and chords, notations, directions, tempo, and the pedal (only with `PedalMarks::Show`).
@@ -56,4 +58,4 @@ A format 1 file with three tracks: a conductor track (tempo and time signatures)
 
 ## MuseScore (`render.rs`)
 
-`find_musescore` uses `PNO_MUSESCORE`, then the `PATH`, then the standard install places. `convert` first deletes old output files, because MuseScore reports success when it cannot replace a file. Then it runs MuseScore and collects the output (one file, or numbered pages). `pno render` and the PDF, PNG, SVG, `.mscz` and audio exports use it.
+`find_musescore` uses `PNO_MUSESCORE`, then the `PATH`, then the standard install places. `convert` first deletes old output files, because MuseScore reports success when it cannot replace a file. Then it runs MuseScore and collects the output (one file, or numbered pages). `pno render` and the PDF, PNG, SVG, `.mscz` and audio exports use it. `convert_all` makes several outputs of one input in one MuseScore run, for the video sheet.

@@ -448,6 +448,7 @@ fn pitch_mark(c: &mut Cursor) -> Result<PitchMark, String> {
         "td" => PitchMark::TieDown,
         "hide" => PitchMark::Hide,
         "lv" => PitchMark::LetRing,
+        "m" => PitchMark::Main,
         "gl" => PitchMark::Gliss(GlissLine::Wavy),
         "glt" => PitchMark::Gliss(GlissLine::WavyText),
         "sl" => PitchMark::Gliss(GlissLine::Straight),

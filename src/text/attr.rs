@@ -99,6 +99,14 @@ pub fn parse_attr(name: &str, value: &str) -> Result<Attr, String> {
             )),
         };
     }
+    if let Some(sub) = name.strip_prefix("voicing.") {
+        return match Lane::parse(sub) {
+            Some(lane @ Lane::Voice(..)) => Ok(Attr::Voicing(lane, signed(value)?)),
+            _ => Err(format!(
+                "`{name}`: voicing. takes a voice lane, for example voicing.rh="
+            )),
+        };
+    }
     let attr = match name {
         "format" => Attr::Format(value.parse().map_err(|_| unknown_value())?),
         "key" => Attr::Key(parse_key(value).ok_or_else(unknown_value)?),
@@ -399,6 +407,8 @@ impl fmt::Display for Attr {
             Attr::VelMark(m, v) => write!(f, "vel.{}={}", m.name(), fmt_num(*v)),
             Attr::VelLane(l, v) if *v == 0.0 => write!(f, "vel.{l}=0"),
             Attr::VelLane(l, v) => write!(f, "vel.{l}={}", fmt_signed(*v)),
+            Attr::Voicing(l, v) if *v == 0.0 => write!(f, "voicing.{l}=0"),
+            Attr::Voicing(l, v) => write!(f, "voicing.{l}={}", fmt_signed(*v)),
             Attr::Program(p) => write!(f, "program={p}"),
             Attr::Volume(v) => write!(f, "volume={}", fmt_num(*v)),
             Attr::Pan(v) => write!(f, "pan={}", fmt_num(*v)),

@@ -269,6 +269,13 @@ fn export_options_name_the_formats_they_apply_to() {
     ]);
     assert_eq!(run.code, 2);
     assert!(run.stderr.contains("two hex colours"), "{}", run.stderr);
+    let run = pno(&["export", path(&score), path(&pdf), "--sheet"]);
+    assert_eq!(run.code, 2);
+    assert!(
+        run.stderr.contains("--sheet applies only to video"),
+        "{}",
+        run.stderr
+    );
     let wav = dir.join("x.wav");
     let sf2 = write(&dir, "piano.sf2", "");
     let run = pno(&["export", path(&score), path(&wav), "--sound", path(&sf2)]);
@@ -791,6 +798,29 @@ fn bars_plays_a_range_with_the_tempo_in_effect() {
         "C6 in bar 3"
     );
     assert_eq!(m.pedal, vec![], "the pedal of bar 1 ends there");
+}
+
+#[test]
+fn bars_from_bar_1_plays_the_pickup_before_it() {
+    let dir = temp_dir("play-bars-pickup");
+    let text = "@ format=1\n\n0 rh | x G4 |\n0 lh | x r |\n\n1 rh | C5 | D5 | E5 | F5 |\n1 lh | R |\n\n2 rh | G5 | - | - | - |\n2 lh | R |\n";
+    let score = write(&dir, "p.pno", text);
+    let m = export(&dir, &score, "b.mid", &["--bars", "1-2"]);
+    let first = m
+        .notes
+        .iter()
+        .min_by_key(|n| n.on)
+        .expect("notes are played");
+    assert_eq!(
+        (first.on, first.key),
+        (0, 67),
+        "the pickup G4 starts the range"
+    );
+    let m = export(&dir, &score, "c.mid", &["--bars", "2-2"]);
+    assert!(
+        m.notes.iter().all(|n| n.key != 67),
+        "a range from bar 2 has no pickup"
+    );
 }
 
 #[test]

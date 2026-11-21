@@ -23,10 +23,32 @@ pub fn pno(args: &[&str]) -> Run {
     }
 }
 
-pub fn temp_dir(test: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("pno-test-{}-{test}", std::process::id()));
+pub struct TempDir(PathBuf);
+
+impl std::ops::Deref for TempDir {
+    type Target = Path;
+
+    fn deref(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        // A failed test keeps its files to inspect.
+        if !std::thread::panicking() {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+}
+
+pub fn temp_dir(test: &str) -> TempDir {
+    // Tests in one binary run in parallel and can share a name.
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("pno-test-{}-{n}-{test}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("temp dir is created");
-    dir
+    TempDir(dir)
 }
 
 pub fn write(dir: &Path, name: &str, text: &str) -> PathBuf {

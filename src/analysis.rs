@@ -64,6 +64,7 @@ pub struct BarInfo {
     pub key: Key,
     pub vel_marks: HashMap<u8, f64>,
     pub vel_lanes: BTreeMap<Lane, f64>,
+    pub voicing: BTreeMap<Lane, f64>,
 }
 
 #[derive(Clone, Debug)]
@@ -257,6 +258,7 @@ impl<'a> Analysis<'a> {
         };
         let mut vel_marks: HashMap<u8, f64> = HashMap::new();
         let mut vel_lanes: BTreeMap<Lane, f64> = BTreeMap::new();
+        let mut voicing: BTreeMap<Lane, f64> = BTreeMap::new();
         for a in &self.score.header {
             match a {
                 Attr::Key(k) => key = *k,
@@ -265,6 +267,9 @@ impl<'a> Analysis<'a> {
                 }
                 Attr::VelLane(l, v) => {
                     vel_lanes.insert(*l, *v);
+                }
+                Attr::Voicing(l, v) => {
+                    voicing.insert(*l, *v);
                 }
                 Attr::PedalStyle(s) => self.pedal_style = *s,
                 _ => {}
@@ -281,6 +286,9 @@ impl<'a> Analysis<'a> {
                     Attr::VelLane(l, v) => {
                         vel_lanes.insert(*l, *v);
                     }
+                    Attr::Voicing(l, v) => {
+                        voicing.insert(*l, *v);
+                    }
                     _ => {}
                 }
             }
@@ -289,6 +297,7 @@ impl<'a> Analysis<'a> {
                 key,
                 vel_marks: vel_marks.clone(),
                 vel_lanes: vel_lanes.clone(),
+                voicing: voicing.clone(),
             });
             t += bar.layout.length();
         }
@@ -1230,10 +1239,51 @@ impl<'a> Analysis<'a> {
                 .find_map(vel_of),
         });
         let note = self.notes_of(r).and_then(Note::vel);
-        let sum = level + lane + token.unwrap_or(0.0) + note.unwrap_or(0.0);
+        let sum = level + lane + self.voicing(r) + token.unwrap_or(0.0) + note.unwrap_or(0.0);
         Velocity {
             mark: level,
             note: if self.muted(r) { 0.0 } else { sum },
+        }
+    }
+
+    fn chord_of(&self, r: NoteRef) -> Option<&'a [Note]> {
+        let ev = self.leaves[r.leaf].event()?;
+        match r.part {
+            Part::Main => Some(ev.notes()),
+            Part::Grace(g) => Some(&ev.grace.as_ref()?.notes.get(g)?.notes),
+            Part::After(g) => Some(&ev.after.as_ref()?.notes.get(g)?.notes),
+        }
+    }
+
+    // The voicing level of the lane lowers each note of a chord but its main note: `^m`, else the top note in the upper staff and
+    // the bottom note in the lower staff. A copy of the main note in another octave gets half the level.
+    fn voicing(&self, r: NoteRef) -> f64 {
+        let leaf = &self.leaves[r.leaf];
+        let level = self.bars[leaf.bar]
+            .voicing
+            .get(&leaf.lane)
+            .copied()
+            .unwrap_or(0.0);
+        let (Some(chord), Some(note)) = (self.chord_of(r), self.notes_of(r)) else {
+            return 0.0;
+        };
+        if level == 0.0 || chord.len() < 2 {
+            return 0.0;
+        }
+        let midi = |n: &&Note| n.pitch.midi();
+        let marked = chord.iter().find(|n| n.has(crate::model::PitchMark::Main));
+        let outer = match Self::home_staff(leaf.lane) {
+            Staff::Upper => chord.iter().max_by_key(midi),
+            Staff::Lower => chord.iter().min_by_key(midi),
+        };
+        let Some(main) = marked.or(outer) else {
+            return 0.0;
+        };
+        let apart = note.pitch.midi() - main.pitch.midi();
+        match apart {
+            0 => 0.0,
+            _ if apart % 12 == 0 => level / 2.0,
+            _ => level,
         }
     }
 

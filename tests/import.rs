@@ -99,7 +99,7 @@ fn kept_beams_of_grace_notes_survive_export_and_import() {
 #[test]
 fn velocity_lines_survive_export_and_import() {
     let dir = temp_dir("import-vel");
-    let text = "@ format=1\n@ vel.p=52\n\n1 @      vel.rh=+10\n1 rh.dyn | p | _ | _ | _ |\n1 rh     | C5 | D5:v-10 | E5 | F5 |\n1 lh     | C3 | - | - | - |\n";
+    let text = "@ format=1\n@ vel.p=52\n@ voicing.rh=-12\n\n1 @      vel.rh=+10\n1 rh.dyn | p | _ | _ | _ |\n1 rh     | C5+E5 | D5:v-10 | E5 | F5 |\n1 lh     | C3 | - | - | - |\n";
     let f = write(&dir, "v.pno", text);
     let xml = dir.join("v.musicxml");
     let back = dir.join("back.pno");

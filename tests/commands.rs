@@ -1,11 +1,13 @@
 mod common;
 
-use common::{path, pno, root, temp_dir, write};
+use common::{TempDir, path, pno, root, temp_dir, write};
 
-fn score_copy(test: &str) -> std::path::PathBuf {
+fn score_copy(test: &str) -> (TempDir, std::path::PathBuf) {
     let text =
         std::fs::read_to_string(root().join("tests/fixtures/tristesse.pno")).expect("test score");
-    write(&temp_dir(test), "score.pno", &text)
+    let dir = temp_dir(test);
+    let score = write(&dir, "score.pno", &text);
+    (dir, score)
 }
 
 fn run_ok(args: &[&str]) -> String {
@@ -20,7 +22,7 @@ fn read(p: &std::path::Path) -> String {
 
 #[test]
 fn sound_shows_held_notes_across_the_barline_and_into_another_voice() {
-    let f = score_copy("sound");
+    let (_dir, f) = score_copy("sound");
     let out = run_ok(&["sound", path(&f), "2"]);
     assert!(
         out.contains("\n2 1      lh B1 | rh A3 D#4~ F#4~\n"),
@@ -86,12 +88,44 @@ fn sound_velocity_shows_the_midi_velocity_of_each_new_note() {
 }
 
 #[test]
+fn voicing_lowers_each_chord_note_but_the_main_note() {
+    let dir = temp_dir("voicing");
+    let text = "@ format=1
+@ voicing.rh=-12
+@ voicing.lh=-8
+
+1 rh | C5+E5+G5+C6 | E4+G4^m+C5 | G5 | - |
+1 lh | C3+G3+E4 | - | - | - |
+";
+    let f = write(&dir, "v.pno", text);
+    let out = run_ok(&["sound", path(&f), "--velocity"]);
+    // Top note in the right hand, bottom note in the left hand; the octave copy of the main note gets half.
+    assert!(
+        out.contains("\n1 1      lh C3@68 G3@60 E4@60 | rh C5@62 E5@56 G5@56 C6@68\n"),
+        "{out}"
+    );
+    assert!(out.contains("| rh E4@56 G4@68 C5@56\n"), "{out}");
+    assert!(out.contains("| rh G5@68\n"), "{out}");
+}
+
+#[test]
 fn analyze_names_chords_and_repeated_bars() {
-    let f = score_copy("analyze");
+    let (_dir, f) = score_copy("analyze");
     let out = run_ok(&["analyze", path(&f), "2,10"]);
     // D#4 and F#4 are tied from bar 1 under the G#4.
     assert!(out.contains("\n2    B7 add G# | E\n"), "{out}");
     assert!(out.contains("\n10 rh = 2 rh\n"), "{out}");
+}
+
+#[test]
+fn analyze_lists_held_clashes_and_pedal_blur_but_not_short_notes_or_the_tune() {
+    let dir = temp_dir("analyze-clashes");
+    let text = "@ format=1\n@ time=4/4\n\n1 rh | E5 | F5 | G5 | A5 |\n1 lh | C3 | D3 | E3 | F3 |\n1 ped | P | - | - | - |\n\n2 rh | B4 G4 | E5 | - | - |\n2 lh | C4 | - | - | - |\n2 ped | _ | _ | _ | _ |\n";
+    let f = write(&dir, "clash.pno", text);
+    let out = run_ok(&["analyze", path(&f), "--all"]);
+    assert!(out.contains("\n1 2      lh C3 (pedal) / D3: M2\n"), "{out}");
+    assert!(!out.contains("(pedal) / F5"), "{out}");
+    assert!(!out.contains("rh B4 / lh C4"), "{out}");
 }
 
 #[test]
@@ -113,7 +147,7 @@ fn fmt_reports_check_errors() {
 
 #[test]
 fn copy_then_delete_gives_the_same_file() {
-    let f = score_copy("copy");
+    let (_dir, f) = score_copy("copy");
     let before = read(&f);
     run_ok(&["bars", "copy", path(&f), "14", "15"]);
     let copied = read(&f);
@@ -153,7 +187,7 @@ fn an_edit_that_fails_check_leaves_the_file_unchanged() {
 
 #[test]
 fn transpose_spells_in_the_new_key_and_returns() {
-    let f = score_copy("transpose");
+    let (_dir, f) = score_copy("transpose");
     let before = read(&f);
     run_ok(&["transpose", path(&f), "2"]);
     let up = read(&f);

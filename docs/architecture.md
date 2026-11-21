@@ -25,7 +25,7 @@ MusicXML ──import──▶ Score
 | `fmt.rs` | The canonical form |
 | `edit.rs` | The structural edits |
 | `analyze.rs` | The text reports of `sound` and `analyze` |
-| `perform.rs`, `midi.rs`, `audio.rs`, `video.rs` | Playback: see [playback and export](playback-and-export.md) |
+| `perform.rs`, `midi.rs`, `audio.rs`, `video.rs`, `sheet.rs` | Playback: see [playback and export](playback-and-export.md) |
 | `musicxml.rs`, `musicxml/` | MusicXML export and import |
 | `render.rs` | Runs MuseScore |
 | `a2p.rs` | `pno a2p`: see [audio-to-pno](audio-to-pno.md) |
@@ -54,7 +54,7 @@ MusicXML ──import──▶ Score
 
 - `abs(bar, t)`: the time from the start of the score.
 - `ottava_at`, `level_at`, `mark_at`: what is in effect at a place.
-- `velocity(note)`: the velocity of a written note, from the dynamic level and the lane, token and note offsets. Playback, `check` and `sound --velocity` all use it.
+- `velocity(note)`: the velocity of a written note, from the dynamic level and the lane, voicing, token and note offsets. Playback, `check` and `sound --velocity` all use it.
 
 `check`, `sound`, `analyze`, the MusicXML export and the performance all read the same `Analysis`.
 

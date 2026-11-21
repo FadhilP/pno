@@ -52,12 +52,14 @@ The file stores playback data only where it differs from what the notation impli
 ```
 @ vel.p=52
 4 @ vel.rh2=-15
+4 @ voicing.rh=-12
 
 9 phrase | / | _ | _ breath | _ |
 9 rh     | E5:v+8 C5^a-20 | ...
 ```
 
 - `vel.p=52` sets the velocity of each `p` mark, and `vel.rh2=-15` is an offset for the voice `rh2` from bar 4.
+- `voicing.rh=-12` makes each chord note of `rh` 12 softer than its main note, from bar 4: the top note, or the pitch marked `^m`. In a lower-staff lane the main note is the bottom note.
 - `:v+8` is a note offset; `^a-20` starts a note 20 ticks early.
 - In the `phrase` lane, `/` starts a phrase, and a drawn breath mark starts the next one.
 
@@ -70,8 +72,8 @@ The file stores playback data only where it differs from what the notation impli
   - The tempo words "rit.", "ritard.", "riten.", "rall.", "allarg.", "slentando", "accel." and "string." (with "poco" or "molto"), "a tempo" and "Tempo I" change the tempo, in the `tempo` and `txt` lanes.
   - A breath mark, a caesura and a fermata on a barline make a short pause.
 - **Audio** (`.wav`, `.mp3`, `.flac`, `.ogg`) with `--sound piano.sfz`: the same MIDI through sfizz, with 4 s for the release sound. The loudest point is at -1 dBFS, and the silence at the end is cut. Without `--sound`, MuseScore plays only the notation.
-- **Video** (`.mp4`) with `--sound piano.sfz`: notes fall onto a keyboard, 1920×1080 at 60 fps, with the same audio. `rh` is green and `lh` is blue; `--colors 5CC478,5494E4` sets the two colours. Louder notes are brighter. A faint line marks each C and each bar. While the pedal is down, the background is violet and a violet strip shows above the keyboard; a bright violet line marks each press. The video starts 2 s before the music.
-- **`--bars 9-14`** plays only those bars, with the tempo in effect there.
+- **Video** (`.mp4`) with `--sound piano.sfz`: notes fall onto a keyboard, 1920×1080 at 60 fps, with the same audio. `rh` is green and `lh` is blue; `--colors 5CC478,5494E4` sets the two colours. Louder notes are brighter. A faint line marks each C and each bar. While the pedal is down, the background is violet and a violet strip shows above the keyboard; a bright violet line marks each press. The video starts 2 s before the music. `--sheet` (or `--sheet below`) adds the score in a band below the keyboard, black on white; `--sheet top` puts the band at the top of the frame, over the falling notes, at 40 % opacity. The band shows the system that plays, about 6 bars. A red line moves with the music across the notes, and a faint box marks the bar that plays. When the line goes to the next system, the band scrolls up. MuseScore draws the score.
+- **`--bars 9-14`** plays only those bars, with the tempo in effect there. A range from bar 1 also plays the pickup (bar 0).
 - **`--humanize`** adds small changes of timing and velocity, plays the melody (the top note of `rh`) a little earlier and louder than the other notes, and ends the piece with a ritardando if no slower tempo is in effect there. It prints its seed; `--seed N` repeats a performance.
 - **`--phrase`** shapes each phrase: softer and a little slower at its start, louder and a little faster near its middle, and slowest at its end (3 % slower). `--phrase=2` doubles the curve; use more with phrase marks that you checked. A `//` mark starts a section, whose arch adds half of its value to the phrase arch. With no `phrase` line, pno finds the phrases from slurs of two bars or longer in `rh`, and else from groups of 2 to 8 bars (4 if no end is stronger) that end at a section end, a rest, a long note, a bass on the tonic or where an earlier theme comes back. A phrase starts at its upbeat. `pno phrase score.pno` writes the phrases that it finds into the file, with `//` at section ends, and prints why each starts, so you can correct them.
 
@@ -104,10 +106,10 @@ pno export score.pno out.mp3 --sound piano.sfz --humanize --phrase
 | `check FILE [BARS]` | Syntax, bar fill, note values, ties and open spans. Each error gives the bar, lane and cell, and most give a correction. |
 | `fmt FILE [--fix] [--check]` | Writes the canonical form, then checks. `--fix` splits invalid `-` runs and renumbers the bars. |
 | `import FILE [-o OUT] [--keep stems,beams]` | MusicXML (and `.mxl`, `.mscz`) to `pno`, with a report of each dropped element. |
-| `export FILE OUT... [--humanize [--seed N]] [--phrase[=AMOUNT]] [--sound SFZ] [--bars B] [--colors RH,LH]` | MusicXML and MIDI directly; PDF, PNG, SVG and the other MuseScore formats through MuseScore, with no pedal marks (MusicXML, `.mxl`, `.mscz` and `.mscx` keep them, and all playback uses the pedal). Audio through MuseScore, or with `--sound` through sfizz (`.wav`, and `.mp3`, `.flac`, `.ogg` through ffmpeg). A video (`.mp4`) with `--sound`. With several output files, MIDI and the audio and video made with `--sound` play one performance; each option applies to the formats that use it. A file that cannot be written (for example one that another program has open) is named, and the other files are still written. See [Playback](#playback). |
+| `export FILE OUT... [--humanize [--seed N]] [--phrase[=AMOUNT]] [--sound SFZ] [--bars B] [--colors RH,LH] [--sheet [below\|top]]` | MusicXML and MIDI directly; PDF, PNG, SVG and the other MuseScore formats through MuseScore, with no pedal marks (MusicXML, `.mxl`, `.mscz` and `.mscx` keep them, and all playback uses the pedal). Audio through MuseScore, or with `--sound` through sfizz (`.wav`, and `.mp3`, `.flac`, `.ogg` through ffmpeg). A video (`.mp4`) with `--sound`, and with `--sheet` the score under or over the notes (through MuseScore). With several output files, MIDI and the audio and video made with `--sound` play one performance; each option applies to the formats that use it. A file that cannot be written (for example one that another program has open) is named, and the other files are still written. See [Playback](#playback). |
 | `render FILE [BARS] [-o OUT] [--dpi N]` | A trimmed PNG of a bar range or of the score. |
 | `sound FILE [BARS] [--pedal] [--velocity]` | The pitches that sound at each onset, with held notes and the pedal. `--velocity` adds the MIDI velocity of each new note (`C5@80`). |
-| `analyze FILE [BARS] [--all]` | The chord of each beat, dissonances between the hands, repeated bars. |
+| `analyze FILE [BARS] [--all]` | The chord of each beat, dissonances that sound a beat or more between the hands and under the pedal, repeated bars. |
 | `set FILE LINE...` | Replaces lines by bar and lane, or adds a lane to a bar. |
 | `phrase FILE` | Writes the phrases that `--phrase` finds as `/` and `//` marks, and prints why each starts. |
 | `bars insert\|delete\|copy`, `transpose` | Structural edits that are error-prone as text edits. |

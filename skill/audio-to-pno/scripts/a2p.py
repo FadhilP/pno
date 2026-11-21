@@ -9,6 +9,12 @@ import numpy as np
 SR, HOP, LOWEST_MIDI, BINS = 22050, 512, 24, 84
 NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
 STEP = {'C': 0, 'D': 2, 'E': 4, 'F': 5, 'G': 7, 'A': 9, 'B': 11}
+PITCH = re.compile(r'([A-G])(#*|b*)(-?\d)')
+RANGE = r'\d+(:\d+(\.\d+)?)?(-\d+(:\d+(\.\d+)?)?)?'
+RANGES = re.compile(rf'{RANGE}(,{RANGE})*')
+DRAFT_LINE = re.compile(r'\s*(\d+)\s+((?:rh|lh)\d*)(\s[^|]*)?')
+BAR_LINE = re.compile(r'\s*(\d+)\s')
+SLOT_NOTE = re.compile(r'(\d+):(.+?)/(\d+)\S*')      # slot:pitch/sixteenths as roll and tune print it, with their marks after it
 STRONG = 85          # piano-model velocity that marks a prominent note
 MELODY_FLOOR = 69    # with no song file, the tune is the top score note from A4
 MODELS = {'t': 'tk', 'p': 'pt', 'b': 'bp'}      # the letter of a model in the output, and its note file
@@ -16,12 +22,28 @@ AGREE_S = 0.08       # two models have the same note when their onsets are this 
 BEAT_MODEL = Path.home() / '.cache' / 'audio-to-pno' / 'beat_this-final0.ckpt'
 # the lead voice without backing vocals: in 24 pop songs it gave `tune` 3 points more than the vocals of demucs
 LEAD_MODEL, LEAD_MODEL_DIR = 'bs_roformer_karaoke_frazer_becruily.ckpt', BEAT_MODEL.parent / 'separator'
+# guitar.wav and piano.wav, and the model that reads each: in 12 RWC songs this split gave piano notes F .81 (bp on the demucs
+# other stem .39, Transkun on backing.wav .55, htdemucs_6s .40) and guitar notes F .39 (.34; htdemucs_6s .34)
+PARTS_MODEL = 'BS-Roformer-SW.ckpt'
+# bp notes of more stems, in 24 RWC songs: note F of the instrument family / share of the seconds without it where the stem plays.
+# The other stem of SW: strings .18 / .57, brass .16 / .86, woodwinds .20 / .77, synth .28 / .58 (htdemucs other: .06-.16 / .96-.98).
+# strings: gilliaan bowed strings v2 on src.wav (CC BY-NC-SA 4.0) .22 / .22, but it misses quiet parts; Mega 53 (no licence stated): brass .21 / .06 (5 songs),
+# woodwinds .39 / .05 (3 songs), organ .10 / .18 (htdemucs other .05 / .98), synth .25 / .09. With the gate of audible_notes, F of
+# strings .27, brass .55, woodwinds .66, organ .14, synth .30
+LAYERS = ('strings', 'brass', 'woodwinds', 'organ', 'synth')
+PART_NOTES = {'guitar': {'b': 'bp_guitar'}, 'piano': {'t': 'tk_piano'}} | {layer: {'b': f'bp_{layer}'} for layer in LAYERS}
+STRINGS_MODEL = (LEAD_MODEL_DIR / 'gilliaan_bsroformer_bowedstrings_v2.ckpt', 'https://huggingface.co/gilliaan/Stem-Separation-Models/resolve/'
+                 '62fe7d8e363e7285d1d24aaaab87351ebc566bae/BowedStrings/BandSplitRoformer/gilliaan_bsroformer_bowedstrings_v2.ckpt')
+MEGA_URL = 'https://huggingface.co/noblebarkrr/BS-Roformer-MVSep-Mega-53-stems/resolve/0677941f9cdfd891a6bc3336229244e197035327/v1/bs_mega_53stem_'
+# the Mega 53 files have one head each on the same backbone: one model with the four heads gives the same stems in a quarter of the time
+MEGA_HEADS = {'brass': 'brass', 'woodwind': 'woodwinds', 'organ': 'organ', 'synth': 'synth'}
 # the chord model BTC reads the log CQT of 22.05 kHz audio (24 bins an octave from C1) in windows of 108 frames of 93 ms
 CHORD_MODEL = BEAT_MODEL.parent / 'btc_model_large_voca.pt'
 CHORD_SR, CHORD_HOP, CHORD_BINS, CHORD_WINDOW = 22050, 2048, 144, 108
 # the 14 chord types of BTC, in its order, as the triad that `roll` prints: in 24 pop songs 1 of 3 of its sevenths was false
 CHORD_KINDS = ['m', '', 'dim', 'aug', 'm', '', 'm', 'm', '', '', 'dim', 'dim', 'sus2', 'sus4']
 UNSURE = 0.6        # 24 pop songs: below this probability the root of the chord was right half of the time, above it 9 times of 10
+SECOND_CHORD = 0.2  # roll --beats shows the second chord of a beat from this probability
 # beat repair, tuned on rendered clips: a gap of 0.5 or 1.5 beats (this near) in this share of the gaps means two beat levels;
 # a tracked beat less than EXTRA_BEAT of a beat after the last one is not a beat when the next one follows in time
 LEVEL_REACH, LEVEL_SHARE, EXTRA_BEAT = 0.15, 0.15, 0.6
@@ -46,6 +68,10 @@ CHANGE = 16         # cost of a new note; with SIGMA it sets how long a pitch mu
 MIN_S = 0.1         # a shorter note joins its neighbour
 DIP_DB = 10         # a dip this deep in the level above 1 kHz is a consonant: a new syllable starts
 BETWEEN_C = 45      # a note whose steady middle is this many cents from its semitone is sung between two semitones
+# windows of a melody note in seconds, not beats, so that the meter of the grid does not change the result (RWC: true notes flagged
+# .084 -> .059 by song, .189 -> .163 by MELODY; wrong notes flagged as often)
+SUNG_FROM_S, SUNG_TO_S = 0.05, 0.5    # song: the f0 from this long after the onset, until the next note or this long after the onset
+MELODY_S = 0.4      # tune_level: the CQT from the onset, until the next note or this long after it
 WEAK_S = 0.16       # Vocadito: 6 of 10 shorter notes are true, 9 of 10 longer notes
 LEAP = 12           # semitones from the median of the reliable notes around it: often an octave error or a backing voice
 SOFT_DB, SOFT_REACH_S = 12, 1.5    # this much softer than a note this near: a fading end, a breath or bleed (true in 1 of 3 on Vocadito)
@@ -61,6 +87,23 @@ PAR_REACH = 1       # slots between a note and the same note in the parallel bar
 PAR_SHARE = 0.6     # share of the notes of a bar that the parallel bar has
 PAR_NOTES = 6       # notes that a run of parallel bars shares
 INST_SHARE = 0.75   # the notes of an instrument are dense, so more of the sung bar must be in them
+# stem levels, in dB relative to the 99th percentile of the mix in frames of LEVEL_S
+LEVEL_S = 0.1
+STEM_GATE_DB = -40  # a stem plays where its level in 1 s is above this (moored: the drum stem -60 dB without drums, -20 with them)
+SPAN_GAP_S = 4      # a stem that stops for a shorter time still plays
+FADE_DB, FADE_S = 6, 4      # the mix ends with a fade when it is this much below its median level for this long before its end
+TUNING_FRAME = 16384        # 0.37 s at 44.1 kHz: 2.7 Hz bins
+# onsets of a stem: peaks of the spectral flux of 23 ms frames each 5.4 ms at 44.1 kHz (noise bursts: 1 ms early, sd 2 ms)
+ONSET_FRAME, ONSET_HOP, ONSET_GAP_S = 1024, 240, 0.09
+KICK_HZ, SNARE_HZ = (30, 150), (180, 2500)
+STRONG_HIT = 0.3    # of the 99.8th percentile of the flux: a strong drum hit
+FIT_REACH_S = 0.035 # strong drum hits this near an eighth of the grid fit it (moored: 106 hits gave the beat of the hand grid within 0.1 ms)
+DRIFT_BARS = 8
+LEVELS_S = 4        # `levels` without a grid: seconds in a row
+DEAD_S = 1.5        # check: a gap with no new note; not tuned (2 beats at 80 BPM)
+LEAP_S = 0.25       # check: a leap of more than an octave in less time is fast; not tuned (an eighth at 120 BPM)
+CHANGE_LEAD = 1.15     # `grid`: a beat of the bar with this times the chord change of beat 1 is named; 24 RWC songs with known bars: at most 1.07, shifted by 2 beats at least 1.26
+GRID_STEMS = ('drums', 'bass', 'other4', 'lead')   # the start of the music and the drift of `grid` were tuned on the htdemucs other stem
 
 
 def name(p):
@@ -68,7 +111,7 @@ def name(p):
 
 
 def midi(token):
-    m = re.fullmatch(r'([A-G])(#*|b*)(-?\d)', token)
+    m = PITCH.fullmatch(token)
     if not m:
         sys.exit(f'not a pitch: {token}')
     return STEP[m[1]] + m[2].count('#') - m[2].count('b') + 12 * (int(m[3]) + 1)
@@ -80,6 +123,24 @@ def bar_list(spec):
         first, _, last = part.partition('-')
         bars += range(int(first), int(last or first) + 1)
     return bars
+
+
+def in_ranges(spec, bar, beat):
+    """True when bar:beat (beat 1 is the first beat) is in ranges such as 14-21,29:3.5-38, both ends included."""
+    if not RANGES.fullmatch(spec):
+        sys.exit(f'not bar ranges such as 14-21,29:3.5-38: {spec}')
+
+    def position(text, end):
+        bar, _, beat = text.partition(':')
+        return int(bar), float(beat) if beat else math.inf if end else 1
+
+    return any(position(first, False) <= (bar, beat) <= position(last or first, True)
+               for first, _, last in (part.partition('-') for part in spec.split(',')))
+
+
+def octaves_from_sung(song, bar, beat):
+    """The octaves from the sung pitch to the melody of song.json at bar:beat, as `octave` recorded them."""
+    return sum(n for spec, n in song.get('octaves', {}).items() if in_ranges(spec, bar, beat))
 
 
 def bar_ranges(bars):
@@ -180,15 +241,15 @@ def saved_grid(work):
 def model_notes(work, source):
     path = work / f'{source}.json'
     if not path.exists():
-        sys.exit(f'{path} is missing: run `prepare`')
+        sys.exit(f'{path} is missing: run `prepare` (`step parts` for the notes of a stem)')
     return sorted(json.loads(path.read_text())['notes'], key=lambda n: (n['on'], n['p']))
 
 
-def combined(work):
-    """One note list from the three models. `by` has the letters of the models that have the note.
+def combined(work, models=MODELS):
+    """One note list from the models (by default the three of MODELS). `by` has the letters of the models that have the note.
     The onset is from the best model that has it (t, p, b), the length from t, b, p.
     `v` is a velocity of a piano model (None when only bp has the note); `amp` is the bp amplitude."""
-    tagged = sorted(((n['p'], n['on'], mark, n) for mark, source in MODELS.items() for n in model_notes(work, source)),
+    tagged = sorted(((n['p'], n['on'], mark, n) for mark, source in models.items() for n in model_notes(work, source)),
                     key=lambda row: row[:2])
     groups = []
     for pitch, on, mark, note in tagged:
@@ -207,6 +268,13 @@ def combined(work):
                           v=piano['v'] if piano else None, amp=by['b']['v'] if 'b' in by else None,
                           by=''.join(mark for mark in MODELS if mark in by)))
     return sorted(notes, key=lambda n: (n['on'], n['p']))
+
+
+def shown_notes(a):
+    """The merged model notes in the view of `a`; with --stem, all notes of the model of that stem."""
+    if a.stem:
+        return viewed(combined(a.work, PART_NOTES[a.stem]), 'all')
+    return viewed(combined(a.work), a.view)
 
 
 def solo_share(notes):
@@ -251,6 +319,75 @@ def unit(v):
     return v / (np.linalg.norm(v) + 1e-9)
 
 
+def stem_wav(work, stem):
+    path = work / f'{stem}.wav'
+    if not path.exists():
+        sys.exit(f'{path} is missing: run `step parts` (older work folders do not have it)')
+    return path
+
+
+def mono(work, stem):
+    import soundfile as sf
+    x, sr = sf.read(stem_wav(work, stem), dtype='float32')
+    return x.reshape(len(x), -1).mean(1), sr
+
+
+def power(work, stem):
+    """The mean square of a stem in frames of LEVEL_S."""
+    x, sr = mono(work, stem)
+    n = int(sr * LEVEL_S)
+    return (x[:len(x) // n * n].reshape(-1, n) ** 2).mean(1)
+
+
+def levels(work, stems, edges):
+    """{stem: level in dB between each two times of `edges`}, relative to the 99th percentile of the mix in frames of LEVEL_S."""
+    top = np.percentile(power(work, 'src'), 99)
+    out = {}
+    for stem in stems:
+        p = power(work, stem)
+        cuts = np.clip(np.round(np.asarray(edges) / LEVEL_S).astype(int), 0, len(p))
+        out[stem] = np.array([10 * np.log10(p[a:max(b, a + 1)].mean() / top + 1e-12) if a < len(p) else -120.0 for a, b in zip(cuts, cuts[1:])])
+    return out
+
+
+def played_stems(work, stems=('drums', 'bass', 'other', 'lead', *PART_NOTES)):
+    return [stem for stem in stems if (work / f'{stem}.wav').exists()]
+
+
+def spans(level):
+    """(start s, end s) of the runs of 1 s frames above STEM_GATE_DB; a gap shorter than SPAN_GAP_S joins two runs."""
+    runs = []
+    for frame in np.flatnonzero(level > STEM_GATE_DB):
+        if runs and frame - runs[-1][1] < SPAN_GAP_S:
+            runs[-1][1] = frame + 1
+        else:
+            runs.append([frame, frame + 1])
+    return [(int(a), int(b)) for a, b in runs]
+
+
+def stem_onsets(work, stem):
+    """The onsets of a stem where it plays: times, strength (1 at the 99.8th percentile of the spectral flux), and the rise
+    in the kick band and in the snare band (each 1 at its 95th percentile)."""
+    from scipy.signal import find_peaks, stft
+    x, sr = mono(work, stem)
+    freqs, times, spectrum = stft(x, sr, nperseg=ONSET_FRAME, noverlap=ONSET_FRAME - ONSET_HOP)
+    magnitude = np.log1p(50 * np.abs(spectrum))
+    rise = np.maximum(np.diff(magnitude, axis=1, prepend=magnitude[:, :1]), 0)
+    flux = rise.sum(0)
+    top = np.percentile(flux, 99.8)
+    peaks, _ = find_peaks(flux, height=0.1 * top, distance=int(ONSET_GAP_S * sr / ONSET_HOP))
+    plays = levels(work, [stem], np.arange(0, times[-1] + 2))[stem] > STEM_GATE_DB
+    peaks = peaks[plays[times[peaks].astype(int)]]
+    if not len(peaks):
+        return np.zeros((4, 0))
+
+    def band(low, high):
+        rises = np.array([rise[(freqs >= low) & (freqs < high), p:p + 3].sum() for p in peaks])
+        return rises / (np.percentile(rises, 95) + 1e-9)
+
+    return np.array([times[peaks], flux[peaks] / top, band(*KICK_HZ), band(*SNARE_HZ)])
+
+
 # ---------------------------------------------------------------- prepare
 
 def save_notes(work, source, notes):
@@ -285,12 +422,13 @@ def run_stems(work):
         stems = apply_model(model, (x - ref.mean()) / ref.std(), device=device(), split=True, overlap=0.25)[0]
     stems = stems * ref.std() + ref.mean()
     for stem, signal in zip(model.sources, stems):
-        sf.write(work / f'{stem}.wav', signal.numpy().T, sr)
+        # other.wav is the other stem of SW (`parts`)
+        sf.write(work / f'{"other4" if stem == "other" else stem}.wav', signal.numpy().T, sr)
     # the note models read this: a voice and drums give them false notes
     sf.write(work / 'backing.wav', sum(signal for stem, signal in zip(model.sources, stems) if stem in ('bass', 'other')).numpy().T, sr)
 
 
-def run_transkun(work):
+def run_transkun(work, source='backing', target='tk'):
     import moduleconf, soundfile as sf, soxr, torch
     from importlib.resources import files
     folder = files('transkun') / 'pretrained'
@@ -299,11 +437,11 @@ def run_transkun(work):
     state = torch.load(str(folder / '2.0.pt'), map_location='cpu')
     model.load_state_dict(state.get('best_state_dict', state.get('state_dict')), strict=False)
     model.to(device()).eval()
-    audio, rate = sf.read(work / 'backing.wav', dtype='float32')
+    audio, rate = sf.read(work / f'{source}.wav', dtype='float32')
     with torch.no_grad():
         events = model.transcribe(torch.from_numpy(soxr.resample(audio, rate, model.fs)).to(device()), discardSecondHalf=False)
     # a pedal event has a negative pitch
-    save_notes(work, 'tk', [dict(on=float(e.start), off=float(e.end), p=int(e.pitch), v=int(e.velocity)) for e in events if e.pitch > 0])
+    save_notes(work, target, [dict(on=float(e.start), off=float(e.end), p=int(e.pitch), v=int(e.velocity)) for e in events if e.pitch > 0])
 
 
 def run_pt(work):
@@ -323,19 +461,22 @@ def run_basic_pitch(work, source='backing', target='bp'):
     save_notes(work, target, [dict(on=float(s), off=float(e), p=int(p), v=int(round(amp * 127))) for s, e, p, amp, _ in events])
 
 
+def audible_notes(work, stem, notes, gate_db):
+    """The notes where the stem is above gate_db, relative to the 99th percentile of the mix: a silent stem has the rest of the
+    other instruments, and the note models give notes for it (bp in the bass stem of a solo piano: about 100 in a minute)."""
+    import librosa
+    level = lambda name: 20 * np.log10(librosa.feature.rms(y=librosa.load(work / f'{name}.wav', sr=F0_SR, mono=True)[0],
+                                                           frame_length=F0_FRAME, hop_length=F0_HOP)[0] + 1e-9)
+    stem_level, floor = level(stem), np.percentile(level('src'), 99) + gate_db
+    frame = lambda seconds: min(int(seconds * F0_SR / F0_HOP), len(stem_level) - 1)
+    return [n for n in notes if stem_level[frame(n['on']):frame(n['off']) + 1].mean() > floor]
+
+
 def run_bass(work):
     """The bass line of the bass stem: the bp notes of bass.wav, one note at a time. No notes where the stem is silent."""
-    import librosa
     run_basic_pitch(work, 'bass', 'bp_bass')
-    level = lambda stem: 20 * np.log10(librosa.feature.rms(y=librosa.load(work / f'{stem}.wav', sr=F0_SR, mono=True)[0],
-                                                           frame_length=F0_FRAME, hop_length=F0_HOP)[0] + 1e-9)
-    stem, floor = level('bass'), np.percentile(level('src'), 99) + BASS_GATE_DB
-    frame = lambda seconds: min(int(seconds * F0_SR / F0_HOP), len(stem) - 1)
     line = []
-    for n in model_notes(work, 'bp_bass'):
-        # a silent stem has the rest of the other instruments, and bp gives notes for it (a solo piano: about 100 in a minute)
-        if stem[frame(n['on']):frame(n['off']) + 1].mean() <= floor:
-            continue
+    for n in audible_notes(work, 'bass', model_notes(work, 'bp_bass'), BASS_GATE_DB):
         last = line[-1] if line else None
         if not last or n['on'] >= last['off'] - 0.03:
             line.append(n)
@@ -347,6 +488,74 @@ def run_bass(work):
             last['off'] = n['on']
             line.append(n)
     save_notes(work, 'bass', [n for n in line if n['off'] - n['on'] >= BASS_MIN_S])
+
+
+def fetch(path, url):
+    if not path.exists():
+        import urllib.request
+        part = path.with_suffix('.part')
+        urllib.request.urlretrieve(url, part)
+        part.replace(path)
+    return path
+
+
+def strings_config():
+    import yaml
+    path, url = STRINGS_MODEL
+    return yaml.load(fetch(path.with_suffix('.yaml'), url.replace('.ckpt', '.yaml')).read_text(), Loader=yaml.FullLoader)
+
+
+def mega_model():
+    """One model file with the heads of MEGA_HEADS, and its config."""
+    import torch, yaml
+    config = yaml.load(fetch(LEAD_MODEL_DIR / 'bs_mega_53stem_brass_mvsep_config.yaml', MEGA_URL + 'brass_mvsep_config.yaml').read_text(),
+                       Loader=yaml.FullLoader)
+    config['model']['num_stems'] = len(MEGA_HEADS)
+    config['training'] = dict(instruments=list(MEGA_HEADS), target_instrument=None)
+    path = LEAD_MODEL_DIR / 'mega53_heads.ckpt'
+    if not path.exists():
+        state = {}
+        for k, head in enumerate(MEGA_HEADS):
+            single = fetch(LEAD_MODEL_DIR / f'bs_mega_53stem_{head}_mvsep.ckpt', f'{MEGA_URL}{head}_mvsep.ckpt')
+            state |= {key.replace('mask_estimators.0.', f'mask_estimators.{k}.'): value
+                      for key, value in torch.load(single, map_location='cpu', weights_only=True).items()}
+        torch.save(state, path.with_suffix('.part'))
+        path.with_suffix('.part').replace(path)
+        for head in MEGA_HEADS:
+            (LEAD_MODEL_DIR / f'bs_mega_53stem_{head}_mvsep.ckpt').unlink()
+    return path, config
+
+
+def separate(work, folder, source, names, model, config=None):
+    """The stems `names` ({model stem: file name}) of source.wav into the work folder; the other stems stay in `folder`."""
+    from audio_separator.separator import Separator
+    separator = Separator(output_dir=folder, model_file_dir=str(LEAD_MODEL_DIR), output_format='WAV', normalization_threshold=1.0,
+                          use_soundfile=True, sample_rate=config['audio']['sample_rate'] if config else 44100,
+                          mdxc_params=dict(segment_size=256, override_model_segment_size=False, batch_size=1, pitch_shift=0, overlap=2))
+    if config:
+        # audio-separator 0.48 loads only the models of its list
+        config['is_roformer'] = True
+        separator.download_model_files = lambda name: (name, 'MDXC', name, str(model), 'config')
+        separator.load_model_data_from_yaml = lambda _: config
+    separator.load_model(model_filename=Path(model).name)
+    separator.separate(str(work / f'{source}.wav'), custom_output_names=names)
+    for name in names.values():
+        Path(folder, f'{name}.wav').replace(work / f'{name}.wav')
+
+
+def run_parts(work):
+    if (work / 'other.wav').exists() and not (work / 'other4.wav').exists():
+        (work / 'other.wav').replace(work / 'other4.wav')      # a work folder from before: other.wav is the htdemucs stem
+    with tempfile.TemporaryDirectory(dir=work) as folder:
+        separate(work, folder, 'src', {stem: stem for stem in ('guitar', 'piano', 'other')}, PARTS_MODEL)
+        separate(work, folder, 'src', {'strings': 'strings'}, fetch(*STRINGS_MODEL), strings_config())
+        separate(work, folder, 'src', MEGA_HEADS, *mega_model())
+    run_transkun(work, 'piano', 'tk_piano')
+    for part in ('guitar', *LAYERS):
+        run_basic_pitch(work, part, f'bp_{part}')
+    for part, models in PART_NOTES.items():
+        for source in models.values():
+            save_notes(work, source, audible_notes(work, part, model_notes(work, source), STEM_GATE_DB))
 
 
 def run_beat_tracker(work):
@@ -403,7 +612,7 @@ def run_chords(work):
 
 STEPS = dict(stems=run_stems, beats=run_beat_tracker)      # these read src.wav
 # lead reads src.wav too: it runs here so that it shares the GPU with demucs less
-AFTER_STEMS = dict(tk=run_transkun, pt=run_pt, bp=run_basic_pitch, bass=run_bass, lead=run_lead, chords=run_chords)
+AFTER_STEMS = dict(tk=run_transkun, pt=run_pt, bp=run_basic_pitch, bass=run_bass, lead=run_lead, chords=run_chords, parts=run_parts)
 
 
 def cmd_step(a):
@@ -416,8 +625,8 @@ def cmd_prepare(a):
     wav = a.work / 'src.wav'
     subprocess.run(['ffmpeg', '-hide_banner', '-loglevel', 'error', '-y', '-i', a.audio,
                     '-ac', '2', '-ar', '44100', str(wav)], check=True)
-    for cache in ('cqt.npy', 'cqt_lead.npy', 'f0_lead.npy'):
-        (a.work / cache).unlink(missing_ok=True)
+    for cache in [*a.work.glob('cqt*.npy'), a.work / 'f0_lead.npy']:
+        cache.unlink(missing_ok=True)
 
     log = a.work / 'prepare.log'
     # three steps are heavy; with no thread limit they slow each other and the steps take longer than one after the other
@@ -438,7 +647,7 @@ def cmd_prepare(a):
     rms = lambda path: float(np.sqrt((sf.read(path, dtype='float32')[0] ** 2).mean()))
     mix = rms(wav)
     print(f'{sf.info(wav).duration:.0f} s; stems, share of the mix level: '
-          + ' '.join(f'{stem} {rms(a.work / f"{stem}.wav") / mix:.0%}' for stem in ('drums', 'bass', 'other', 'vocals')))
+          + ' '.join(f'{stem} {rms(a.work / f"{stem}.wav") / mix:.0%}' for stem in ('drums', 'bass', 'other', 'vocals', *PART_NOTES)))
     notes = combined(a.work)
     groups = Counter(n['by'] for n in notes)
     print('notes: ' + ' '.join(f'{source} {len(model_notes(a.work, source))}' for source in MODELS.values())
@@ -450,6 +659,38 @@ def cmd_prepare(a):
         again += n['on'] - last_onset.get(n['p'], -9) < 0.25
         last_onset[n['p']] = n['on']
     print(f'{again / max(1, len(bp)):.0%} of the bp notes repeat a pitch within 0.25 s (solo piano: below 10%)')
+    stem_report(a.work)
+
+
+def stem_report(work):
+    import soundfile as sf
+    if not (work / 'other4.wav').exists():
+        print(f'an older work folder: other is the htdemucs stem, and {", ".join(LAYERS)} are missing; `step parts` makes them')
+    level = levels(work, played_stems(work) + ['src'], np.arange(0, sf.info(work / 'src.wav').duration + 1))
+    mix = level.pop('src')
+    print(f'stems play (above {STEM_GATE_DB} dB of the mix top in 1 s frames): '
+          + '; '.join(f'{stem} ' + (', '.join(f'{start}-{end}' for start, end in spans(l)) + ' s' if spans(l) else 'silent') for stem, l in level.items()))
+    playing = np.flatnonzero(mix > STEM_GATE_DB)
+    loud = np.flatnonzero(mix >= np.median(mix[playing]) - FADE_DB)[-1] + 1 if len(playing) else 0
+    if len(playing) and playing[-1] + 1 - loud >= FADE_S:
+        print(f'the mix fades out from {loud} s to {playing[-1] + 1} s')
+    print('tuning, cents from A440: ' + ', '.join(f'{stem} {tuning(work, stem):+.0f}' for stem in ('backing', 'lead') if (work / f'{stem}.wav').exists()))
+
+
+def tuning(work, stem):
+    """Cents from A440: the circular mean of the distances of the spectral peaks from 80 Hz to 1.5 kHz to their semitones,
+    weighted by magnitude."""
+    # not librosa.estimate_tuning: its numba localmax crashed in the venv on float32 input (a damaged numba cache)
+    from scipy.signal import stft
+    x, sr = mono(work, stem)
+    freqs, _, spectrum = stft(x, sr, nperseg=TUNING_FRAME, noverlap=TUNING_FRAME - TUNING_FRAME // 4)
+    rows = np.flatnonzero((freqs >= 80) & (freqs < 1500))
+    m = np.abs(spectrum[rows[0] - 1:rows[-1] + 2])
+    left, middle, right = (np.log(m[k:len(m) - 2 + k] + 1e-12) for k in range(3))
+    peak = (middle > left) & (middle >= right) & (m[1:-1] > 0.2 * m.max(0))
+    hz = (rows[:, None] + 0.5 * (left - right) / (left - 2 * middle + right - 1e-12)) * sr / TUNING_FRAME
+    turn = np.sum(m[1:-1][peak] * np.exp(2j * np.pi * 12 * np.log2(hz[peak] / 440)))
+    return 100 * float(np.angle(turn)) / (2 * np.pi)
 
 
 # ---------------------------------------------------------------- sung tune
@@ -572,9 +813,7 @@ def sung_notes(times, pitch, level, bright):
     voiced = ~np.isnan(pitch)
     if not voiced.any():
         return []
-    # the singer or the recording can be off A440: the circular mean of the distances to the nearest semitone
-    off = pitch[voiced] - np.round(pitch[voiced])
-    pitch = pitch - np.angle(np.exp(2j * np.pi * off).mean()) / (2 * np.pi)
+    pitch = in_tune(pitch)
     edges = np.flatnonzero(np.diff(np.concatenate([[0], voiced.astype(int), [0]])))
     notes = []
     for a, b in zip(edges[::2], edges[1::2]):
@@ -599,6 +838,53 @@ def sung_notes(times, pitch, level, bright):
         notes += [(times[s], times[e - 1] + hop, p) for start, end, p in joined for s, e in at_dips(bright, start, end, least)]
     notes = soft_notes(loud_starts(join_scoops(notes, times, bright), times, level), times, level)
     return [(*note, between(note, times, pitch)) for note in notes]
+
+
+def in_tune(pitch):
+    """The pitch moved by the circular mean of its distances to the nearest semitone: the singer or the recording can be off A440."""
+    voiced = pitch[~np.isnan(pitch)]
+    return pitch - np.angle(np.exp(2j * np.pi * (voiced - np.round(voiced))).mean()) / (2 * np.pi)
+
+
+def sung_name(pitch):
+    """The semitone of a sung pitch, with + or - when it is 30 cents or more above or below it; . when not sung."""
+    if np.isnan(pitch):
+        return '.'
+    near = int(round(pitch))
+    return name(near) + ('+' if pitch - near >= 0.3 else '-' if pitch - near <= -0.3 else '')
+
+
+def contour(bar, grid, times, pitch, dips):
+    """The sung pitch of each slot of the bar in 4 steps, equal steps joined; ' marks a step with a syllable start (a dip)."""
+    cells = []
+    for slot in range(grid.count(bar) * grid.slots):
+        steps = []
+        for k in range(4):
+            start, end = (grid.time(grid.first(bar) + (slot + x / 4) / grid.slots) for x in (k, k + 1))
+            inside = pitch[(times >= start) & (times < end)]
+            sung = inside[~np.isnan(inside)]
+            text = sung_name(np.median(sung)) if len(sung) and len(sung) >= len(inside) / 2 else '.'
+            steps.append(("'" if ((dips >= start) & (dips < end)).any() else '') + text)
+        joined = [step for i, step in enumerate(steps) if i == 0 or step != steps[i - 1]]
+        if joined != ['.']:
+            cells.append(f'{slot}[{" ".join(joined)}]')
+    return ' '.join(cells)
+
+
+def fine_rows(bar, grid, times, pitch, level, bright):
+    """Each slot of the bar in 3 steps: the sung pitch, and the level and the level above BRIGHT_HZ in dB below their 99th percentile."""
+    top, bright_top = np.percentile(level, 99), np.percentile(bright, 99)
+    rows = []
+    for slot in range(grid.count(bar) * grid.slots):
+        steps = []
+        for k in range(3):
+            start, end = (grid.time(grid.first(bar) + (slot + x / 3) / grid.slots) for x in (k, k + 1))
+            inside = (times >= start) & (times < end)
+            sung = pitch[inside][~np.isnan(pitch[inside])]
+            text = sung_name(np.median(sung)) if len(sung) > inside.sum() / 2 else '.'
+            steps.append(f'{text} {level[inside].max(initial=-120) - top:.0f}/{bright[inside].max(initial=-120) - bright_top:.0f}')
+        rows.append(f'    {slot}: ' + '  '.join(f'{step:<13}' for step in steps).rstrip())
+    return rows
 
 
 def between(note, times, pitch):
@@ -723,9 +1009,11 @@ def played_phrases(notes, work, grid):
 
 
 def cmd_tune(a):
+    from scipy.signal import find_peaks
     grid = saved_grid(a.work)
     width = sung_width(grid)
-    notes = on_grid(octave_errors(sung_notes(*vocal_f0(a.work)), a.work), grid, width)
+    times, pitch, level, bright = f0 = vocal_f0(a.work)
+    notes = on_grid(octave_errors(sung_notes(*f0), a.work), grid, width)
     if not notes:
         sys.exit('no sung notes in lead.wav')
     bars, early = line_bars(notes, grid, a.octave)
@@ -741,6 +1029,12 @@ def cmd_tune(a):
         print('=N after a bar: the voice sings the phrase of the bar again in bar N')
     if doubled:
         print('`inst N` under a bar: an instrument plays the phrase of the bar in bar N; its notes as slot:pitch in the octave of the tune, with the model letters of `roll`')
+    tuned = in_tune(pitch) + 12 * a.octave
+    dips = times[find_peaks(-bright, prominence=DIP_DB, distance=round(MIN_S / (times[1] - times[0])))[0]]
+    if a.contour:
+        print("`f0` under a bar: the sung pitch of each slot in 4 steps, slot[pitches]; + or - = 30 cents or more above or below; ' = a syllable starts")
+    if a.fine:
+        print(f'under a bar, each slot in 3 steps: pitch level/bright, in dB below the 99th percentile of lead.wav; bright is the level above {BRIGHT_HZ} Hz: a consonant lowers it')
     for bar in bar_list(a.bars) if a.bars else sorted(bars):
         same = [str(b) for x, b in again if x == bar]
         print(f'{grid.label(bar, grid.slots)} | ' + ' '.join(f'{slot}:{name(p)}/{length}{marks}' for slot, length, p, marks in bars.get(bar, []))
@@ -751,6 +1045,10 @@ def cmd_tune(a):
             b, octave = instrument[0]
             there = top_line([n for n in played if grid.place(n[0])[0] == b], min(sure) + 12 * (octave - a.octave))
             print(f'  inst {b} | ' + ' '.join(f'{grid.place(slot)[1]}:{name(p + 12 * (a.octave - octave))}{letters(played[slot, p])}' for slot, p in there))
+        if a.contour:
+            print(f'  f0 | {contour(bar, grid, times, tuned, dips)}')
+        if a.fine:
+            print('\n'.join(fine_rows(bar, grid, times, tuned, level, bright)))
     melody = {f'{bar}:{round(1 + slot / grid.slots, 3):g}': name(p) for bar in sorted(bars) for slot, _, p, marks in bars[bar] if '?' not in marks}
     (a.work / 'tune.json').write_text(json.dumps(dict(melody=melody), indent=1))
     print(f'draft melody without the doubtful notes: {(a.work / "tune.json").as_posix()} ({len(melody)} notes)')
@@ -934,6 +1232,92 @@ def tracked_grid(work, fields):
     return grid, dict(agree=agree, added=added, on=on, weight=weight, found=found)
 
 
+def drum_fit(times, strength, beat_s, start, eighths):
+    """The constant grid (beat s, time of beat 0) fitted to the strong drum hits near its eighth notes (`eighths` in a beat: 2, or 3
+    in a compound beat), from the given grid, and the count of the hits that fit; None for fewer than 16."""
+    strong = strength > STRONG_HIT
+    for _ in range(8):
+        eighth = np.round((times - start) / (beat_s / eighths))
+        fits = strong & (np.abs(times - start - eighth * beat_s / eighths) < FIT_REACH_S)
+        if fits.sum() < 16:
+            return None
+        beat_s, start = np.linalg.lstsq(np.c_[eighth[fits] / eighths, np.ones(fits.sum())], times[fits], rcond=None)[0]
+    return float(beat_s), float(start), int(fits.sum())
+
+
+def sixteenth_offsets(beats, times, slots):
+    """Seconds from each time to the nearest sixteenth of the beats (`slots` in a beat)."""
+    position = slots * beat_at(beats, times)
+    return (position - np.round(position)) * float(np.median(np.diff(beats))) / slots
+
+
+def drift(grid, beats, onsets):
+    """The mean offset in ms of the onsets from the sixteenths of the beats (a circular mean, weighted by strength), in windows of
+    DRIFT_BARS bars from bar 1; '--' for a window with fewer than 8 onsets."""
+    times, strength = onsets[:2]
+    position = beat_at(beats, times)
+    window = np.array([(grid.bar_at(p)[0] - 1) // DRIFT_BARS for p in position], int)
+    sixteenth_ms = 1000 * float(np.median(np.diff(beats))) / grid.slots
+    out = []
+    for w in range(max(window.max(initial=0), 0) + 1):
+        inside = window == w
+        turn = np.sum(strength[inside] * np.exp(2j * np.pi * grid.slots * position[inside]))
+        out.append(f'{w * DRIFT_BARS + 1}:' + (f'{np.angle(turn) / (2 * np.pi) * sixteenth_ms:+.0f}' if inside.sum() >= 8 else '--'))
+    return ' '.join(out)
+
+
+def backbeat(grid, beats, drums):
+    """Where the kick and the snare fall in the bars of the grid, and what the snare says of the bar start. The kick does not tell
+    beat 1 from beat 3: in 22 RWC songs it was stronger on beat 3 in 6."""
+    times, strength, kick_rise, snare_rise = drums
+    strong = strength > STRONG_HIT
+    kick = strong & (kick_rise > 0.5) & (kick_rise > snare_rise)
+    snare = strong & (snare_rise > 0.5) & (snare_rise > kick_rise)
+    places = [grid.bar_at(p) for p in beat_at(beats, times)]
+    regular = np.array([bar >= 1 and bar not in grid.odd for bar, _ in places])
+    eighth = np.array([round(2 * x) for _, x in places], int) % (2 * grid.per_bar)
+    on_beat = eighth % 2 == 0
+    count = lambda hits: np.bincount(eighth[hits & regular & on_beat] // 2, minlength=grid.per_bar)
+    kicks, snares, between = count(kick), count(snare), int((snare & regular & ~on_beat).sum())
+    text = ('backbeat, kick/snare hits on each beat of the bar: ' + ' '.join(f'{b + 1}:{k}/{s}' for b, (k, s) in enumerate(zip(kicks, snares)))
+            + f', snare between the beats {between}')
+    if snares.sum() + between < 16 or grid.per_bar % 2:
+        return text
+    if between > snares.sum():
+        return text + ': the snare is between the beats: the beat can be two times too slow (level=double)'
+    if snares.sum() < 16:
+        return text
+    if np.sort(snares)[-1] >= 3 * np.sort(snares)[-2]:
+        return text + f': the snare is on beat {snares.argmax() + 1} only: the beat can be two times too fast (level=half), or the drums play half time'
+    beats_of = lambda first: ' and '.join(map(str, range(first, grid.per_bar + 1, 2)))
+    if snares[1::2].sum() >= 2 * snares[::2].sum():
+        return text + f': the snare is on beats {beats_of(2)}: the bars start right, or {grid.per_bar // 2} beats off (the drums do not tell which)'
+    if snares[::2].sum() >= 2 * snares[1::2].sum():
+        return text + f': the snare is on beats {beats_of(1)}: the bars start one beat off: --set shift=1 or shift=-1'
+    return text
+
+
+def chord_change(work, grid):
+    """How much the chords change at each beat of the bar (half the total variation of the chord probabilities of the beat before
+    and the beat after it, a mean over the bars of per_bar beats), and what that says of the bar start; None without chords.npy."""
+    if not (work / 'chords.npy').exists() or grid.per_bar < 2:
+        return None
+    _, frames = chord_frames(work)
+    frame = lambda beat: round(max(grid.time(beat), 0) * CHORD_SR / CHORD_HOP)
+    mean = lambda b0, b1: frames[frame(b0):max(frame(b1), frame(b0) + 1)].mean(0)
+    reach, last = 1, grid.bar_at(len(grid.beats) - 1)[0]
+    bars = [bar for bar in range(2, last) if bar not in grid.odd and frame(grid.first(bar + 1) + reach) <= len(frames)]
+    if len(bars) < 8:
+        return None
+    change = np.array([np.mean([0.5 * np.abs(mean(b - reach, b) - mean(b, b + reach)).sum() for b in (grid.first(bar) + k for bar in bars)])
+                       for k in range(grid.per_bar)])
+    text = 'chord change at each beat of the bar: ' + ' '.join(f'{k + 1}:{short(c)}' for k, c in enumerate(change))
+    top = int(change.argmax())
+    if top and change[top] >= CHANGE_LEAD * change[0]:
+        return text + f': the chords change most on beat {top + 1}: the bars can start {top} beat{"s" * (top > 1)} off: add shift={top} or shift={top - grid.per_bar} to the fields'
+    return text + (': the chords change most on beat 1' if not top else '')
+
+
 def cmd_grid(a):
     g, report = tracked_grid(a.work, a.set or [])
     grid = Grid(g)
@@ -970,7 +1354,36 @@ def cmd_grid(a):
             print(f'the tracker missed {len(added)} beats, added in bars {bar_ranges(sorted({bar_of(t) for t in added}))}: look at these bars with roll')
     position = beat_at(beats, on)
     lock = lambda division: abs(np.sum(weight * np.exp(2j * np.pi * position * division))) / weight.sum()
-    print('onset lock by divisions of the beat: ' + ' '.join(f'{d}:{short(lock(d))}' for d in (1, 2, 3, 4, 6, 8)))
+    print('onset lock by divisions of the beat: ' + ' '.join(f'{d}:{short(lock(d))}' for d in (1, 2, 3, 4, 6, 8, 12)))
+    drums, other = stem_onsets(a.work, 'drums'), stem_onsets(a.work, 'other4')
+    fit = drum_fit(drums[0], drums[1], beat_s, t0, grid.slots // 2)
+    grids, saved_as = {'tracked grid': beats, 'constant grid': constant}, 'constant grid'
+    if fit:
+        fit_beat, fit_start, count = fit
+        # the phase of the note onsets, as the tracked grid has it: in moored they were 12 ms before the drum hits
+        fit_start += np.angle(np.sum(weight * np.exp(2j * np.pi * grid.slots * beat_at(fit_start + fit_beat * index, on)))) / (2 * np.pi) * fit_beat / grid.slots
+        grids['drum fit'] = fit_start + fit_beat * index
+        strong = drums[0][drums[1] > STRONG_HIT]
+        miss = {label: [1000 * float(np.median(np.abs(sixteenth_offsets(b, times, grid.slots)))) for times in (strong, on)] for label, b in grids.items()}
+        # the drums can fit another subdivision than the notes (swing, compound meter): then the notes are farther from the fit
+        if miss['drum fit'][0] < miss['constant grid'][0] and miss['drum fit'][1] <= miss['constant grid'][1]:
+            constant, saved_as = grids['drum fit'], 'drum fit'
+        print(f'drum fit: beat {fit_beat:.4f} s from {fit_start:.3f} s (the beat of {count} drum hits, the phase of the note onsets); median offset from the sixteenths of the {len(strong)} strong '
+              f'drum hits / the {len(on)} note onsets: ' + ', '.join(f'{label} {d:.0f}/{n:.0f} ms' for label, (d, n) in miss.items()) + f': --constant saves the {saved_as}')
+    if len(drums[0]):
+        print(backbeat(grid, beats, drums))
+    harmony = chord_change(a.work, grid)
+    if harmony:
+        print(harmony)
+    before = levels(a.work, played_stems(a.work, GRID_STEMS), np.arange(0, beats[0], LEVEL_S))
+    sounding = [(np.flatnonzero(level > STEM_GATE_DB)[0] * LEVEL_S, stem) for stem, level in before.items() if (level > STEM_GATE_DB).any()]
+    start, stem = min(sounding, default=(beats[0], ''))
+    early = math.ceil((beats[0] - start - 0.25 * period) / (per_bar * period))
+    if early > 0:
+        print(f'{stem} starts at {start:.1f} s, {early} bar{"s" * (early > 1)} before bar 1: --set shift={-early * per_bar} starts bar 1 before it')
+    print(f'drift, mean onset offset from the sixteenths in ms by {DRIFT_BARS} bars from bar 1 (+ = after the grid):')
+    for label in grids:
+        print(f'  {label}: ' + ' | '.join(f'{stem} {drift(grid, grids[label], onsets)}' for stem, onsets in (('drums', drums), ('other4', other)) if len(onsets[0])))
     if a.set is None and not a.constant:
         spectrum, times = source_cqt(a.work)
         profile = chroma(window(spectrum, times, 0, times[-1]))
@@ -978,7 +1391,8 @@ def cmd_grid(a):
         return
     chosen = constant if a.constant else beats
     (a.work / 'grid.json').write_text(json.dumps(g | dict(beats=[round(float(b), 4) for b in chosen])))
-    print(f'saved grid.json: the {"constant" if a.constant else "tracked"} grid, {per_bar} beats in a bar')
+    print(f'saved grid.json: the {"constant" if a.constant else "tracked"} grid' + (' (the drum fit)' if a.constant and saved_as == 'drum fit' else '')
+          + f', {per_bar} beats in a bar')
 
 
 # ---------------------------------------------------------------- evidence
@@ -1024,14 +1438,30 @@ def chord_frames(work):
     return [NAMES[root] + kind for root in range(12) for kind in kinds] + ['-'], np.hstack([triads, 1 - triads.sum(1, keepdims=True)])
 
 
-def chord(names, frames, start, end):
-    """The most probable chord between two times, with ? where its probability is below UNSURE."""
+def chord_choices(names, frames, start, end):
+    """The two most probable chords between two times, with their probabilities."""
     first, last = (round(max(seconds, 0) * CHORD_SR / CHORD_HOP) for seconds in (start, end))
     inside = frames[first:max(last, first + 1)]
     if not len(inside):
-        return '-'
+        return [('-', 1.0), ('-', 0.0)]
     mean = inside.mean(0)
-    return names[mean.argmax()] + ('?' if mean.max() < UNSURE else '')
+    return [(names[k], float(mean[k])) for k in np.argsort(mean)[::-1][:2]]
+
+
+def chord(names, frames, start, end):
+    """The most probable chord between two times, with ? where its probability is below UNSURE."""
+    (best, p), _ = chord_choices(names, frames, start, end)
+    return best + ('?' if p < UNSURE else '')
+
+
+def beat_chords(names, frames, bar, grid):
+    """The chord of each beat of the bar with its probability, and the second chord where its probability is SECOND_CHORD or more."""
+    cells = []
+    for beat in range(grid.count(bar)):
+        start = grid.first(bar) + beat
+        (best, p), (other, q) = chord_choices(names, frames, grid.time(start), grid.time(start + 1))
+        cells.append(f'{beat + 1} {best} {short(p)}' + (f' ({other} {short(q)})' if q >= SECOND_CHORD else ''))
+    return ' | '.join(cells)
 
 
 def bar_chord(names, frames, bar, grid):
@@ -1046,7 +1476,7 @@ def bar_chord(names, frames, bar, grid):
 def cmd_roll(a):
     grid = saved_grid(a.work)
     bass = {grid.place(slot)[0]: pitch for slot, _, pitch, _ in reversed(bass_line(a.work, grid))}
-    notes = merged(viewed(combined(a.work), a.view), grid)
+    notes = merged(shown_notes(a), grid)
     hidden = Counter(grid.place(round(n[0]))[0] for n in notes if not n[7])
     chords = chord_frames(a.work)
 
@@ -1059,18 +1489,39 @@ def cmd_roll(a):
                         for slot, length, p, v, k, by in notes if lowest <= p < highest)
 
     print(f'bar chord bass | below {name(a.split)} | from {name(a.split)} | +hidden notes'
-          + f'; view {a.view}: {VIEWS[a.view]}; slot:pitch/sixteenths, {grid.per_bar * grid.slots} in a bar')
+          + (f'; all notes of {a.stem}.wav' if a.stem else f'; view {a.view}: {VIEWS[a.view]}') + f'; slot:pitch/sixteenths, {grid.per_bar * grid.slots} in a bar')
     for bar in bar_list(a.bars):
         low = bar_bass(notes, bass, bar, grid)
         shown = in_bar(notes, bar)
         print(f'{grid.label(bar, grid.slots)} {bar_chord(*chords, bar, grid)} {name(low) if low else "-"} | {line(shown, 0, a.split)} | {line(shown, a.split, 128)}'
               + (f' | +{hidden[bar]}' if hidden[bar] else ''))
+        if a.beats:
+            print(f'  beats | {beat_chords(*chords, bar, grid)}')
+
+
+def cmd_levels(a):
+    stem_report(a.work)
+    stems = played_stems(a.work) + ['src']
+    by_bar = (a.work / 'grid.json').exists()
+    if by_bar:
+        grid = saved_grid(a.work)
+        last = grid.bar_at(len(grid.beats) - 1)[0]
+        level = levels(a.work, stems, [grid.bar_start(bar) for bar in range(1, last + 2)])
+        rows = [(grid.label(bar), bar - 1) for bar in (bar_list(a.bars) if a.bars else range(1, last + 1)) if 1 <= bar <= last]
+    else:
+        import soundfile as sf
+        level = levels(a.work, stems, np.arange(0, sf.info(a.work / 'src.wav').duration + LEVELS_S, LEVELS_S))
+        rows = [(f'{k * LEVELS_S} s', k) for k in range(len(level['src']))]
+    shown = lambda db: '-' if db < -60 else f'{db:.0f}'
+    print(f'{"bar" if by_bar else "time"} | level in dB below the mix top: {" ".join(stems[:-1])} | mix (src); - = below -60 dB')
+    for label, k in rows:
+        print(f'{label} | ' + ' '.join(shown(level[stem][k]) for stem in stems[:-1]) + f' | {shown(level["src"][k])}')
 
 
 def cmd_raw(a):
     grid = saved_grid(a.work)
-    notes = viewed(combined(a.work), a.view)
-    print(f'bar | beat:pitch/beats(velocity, or a and the bp amplitude) | +hidden notes; view {a.view}')
+    notes = shown_notes(a)
+    print(f'bar | beat:pitch/beats(velocity, or a and the bp amplitude) | +hidden notes; ' + (f'all notes of {a.stem}.wav' if a.stem else f'view {a.view}'))
     for bar in bar_list(a.bars):
         first = grid.first(bar)
         row, hidden = [], 0
@@ -1089,16 +1540,21 @@ def cmd_raw(a):
 
 def cmd_peek(a):
     grid = saved_grid(a.work)
-    spectrum, times = source_cqt(a.work)
-    print('one character is 1/8 beat; a space starts a beat, | starts a bar; from silent to loud: " .:-=+*#%@"')
+    spectrum, times = source_cqt(a.work) if a.stem == 'src' else cqt(stem_wav(a.work, a.stem), a.work / f'cqt_{a.stem}.npy')
+    source = 'the mix' if a.stem == 'src' else f'{a.stem}.wav'
+    beats = [(beat, [window(spectrum, times, grid.time(grid.first(bar) + beat + k / 8), grid.time(grid.first(bar) + beat + (k + 1) / 8))
+                     for k in range(8)])
+             for bar in bar_list(a.bars) for beat in range(grid.count(bar))]
+    top = max((column.max() for _, columns in beats for column in columns), default=0)
+    if not top:
+        sys.exit(f'{source} is silent in bars {a.bars}')
+    print('one character is 1/8 beat; a space starts a beat, | starts a bar; from silent to loud: " .:-=+*#%@", '
+          f'relative to the loudest pitch in these bars, {20 * np.log10(top / spectrum.max()):.0f} dB from the loudest moment of {source}')
     pitches = [midi(token) for token in a.pitches.split(',')]
     rows = {pitch: [] for pitch in pitches}
-    for bar in bar_list(a.bars):
-        for beat in range(grid.count(bar)):
-            start = grid.first(bar) + beat
-            columns = [window(spectrum, times, grid.time(start + k / 8), grid.time(start + (k + 1) / 8)) / spectrum.max() for k in range(8)]
-            for pitch in pitches:
-                rows[pitch].append(('|' if beat == 0 else ' ') + ''.join(' .:-=+*#%@'[min(9, int(15 * c[pitch - LOWEST_MIDI] ** 0.5))] for c in columns))
+    for beat, columns in beats:
+        for pitch in pitches:
+            rows[pitch].append(('|' if beat == 0 else ' ') + ''.join(' .:-=+*#%@'[min(9, int(15 * (c[pitch - LOWEST_MIDI] / top) ** 0.5))] for c in columns))
     for pitch in pitches:
         print(name(pitch).ljust(4) + ''.join(rows[pitch]))
 
@@ -1126,6 +1582,21 @@ def score_notes(path, grid):
         elif message.type in ('note_off', 'note_on') and message.note in sounding:
             notes.append((sounding.pop(message.note) * to_slot, tick * to_slot, message.note))
     return sorted(notes), (tempo or 500000) / 1e6 * grid.quarters
+
+
+def tune_level(spectrum, times, onset, next_onset, pitch):
+    """The level of a tune note in the recording at its onset against the loudest pitch from an octave below to an octave above,
+    and the louder pitch near it when the note is weak (None when it is not)."""
+    s = window(spectrum, times, onset, min(next_onset, onset + MELODY_S))
+    k = pitch - LOWEST_MIDI
+    low = max(0, k - 12)
+    octave, close = s[low:k + 13], s[max(0, k - 2):k + 3]
+    louder = None
+    if s[k] < 0.7 * close.max():
+        louder = int(close.argmax()) + max(0, k - 2) + LOWEST_MIDI
+    elif s[k] < 0.25 * octave.max():
+        louder = int(octave.argmax()) + low + LOWEST_MIDI
+    return s[k] / (octave.max() + 1e-9), louder
 
 
 def cmd_compare(a):
@@ -1175,27 +1646,33 @@ def cmd_compare(a):
                                                                            for s, p in strong if not near(written, s, p, 1.6)], len(strong))
 
     if a.song:
-        tune = []
-        for key, pitch in json.loads(Path(a.song).read_text())['melody'].items():
+        song = json.loads(Path(a.song).read_text())
+        tune, moved = [], 0
+        for key, pitch in song['melody'].items():
             bar, _, beat = key.partition(':')
-            tune.append((grid.first(int(bar)) + float(beat) - 1, midi(pitch)))
+            octaves = octaves_from_sung(song, int(bar), float(beat))
+            tune.append((grid.first(int(bar)) + float(beat) - 1, midi(pitch) - 12 * octaves))
+            moved += octaves != 0
+        if moved:
+            print(f'MELODY tests {moved} notes at the sung pitch: `octaves` in the song file moves them from it')
     else:
         tune = [(start / grid.slots, pitch) for start, pitch in top_line([(s, p) for s, _, p in score], MELODY_FLOOR)]
-    weak = []
-    for beat, pitch in tune:
-        s = window(src, src_t, grid.time(beat), grid.time(beat + 0.5))
-        k = pitch - LOWEST_MIDI
-        low = max(0, k - 12)
-        octave, close = s[low:k + 13], s[max(0, k - 2):k + 3]
-        is_weak = s[k] < 0.25 * octave.max() or s[k] < 0.7 * close.max()
-        louder = name(int(close.argmax()) + max(0, k - 2) + LOWEST_MIDI) if s[k] < 0.7 * close.max() else name(int(octave.argmax()) + low + LOWEST_MIDI)
+    tune.sort()
+    onsets = [grid.time(beat) for beat, _ in tune] + [math.inf]
+    weak, octave = [], []
+    for i, (beat, pitch) in enumerate(tune):
+        level, louder = tune_level(src, src_t, onsets[i], onsets[i + 1], pitch)
         bar, in_bar = grid.bar_at(beat)
-        text = f'{bar}:{in_bar + 1:g} {name(pitch)}' + (f'<{louder}' if is_weak else '')
-        full.append(f'MELODY {text} level {short(s[k] / (octave.max() + 1e-9))}')
-        if is_weak:
+        text = f'{bar}:{in_bar + 1:g} {name(pitch)}' + (f'<{name(louder)}' if louder is not None else '')
+        full.append(f'MELODY {text} level {short(level)}')
+        if louder is not None and abs(louder - pitch) == 12:
+            octave.append(bar)
+        elif louder is not None:
             weak.append(text)
-    print(f'MELODY ({"the tune of the song file" if a.song else f"top score notes from {name(MELODY_FLOOR)}"}): {len(weak)} of {len(tune)} tune notes are weak '
+    print(f'MELODY ({"the tune of the song file" if a.song else f"top score notes from {name(MELODY_FLOOR)}"}): {len(weak) + len(octave)} of {len(tune)} tune notes are weak '
           'in the recording at their onset (bar:beat pitch<louder pitch near it)' + (':' if weak else ''))
+    if octave:
+        print(f'  {len(octave)} with the louder pitch one octave away, in bars {bar_ranges(sorted(set(octave)))}')
     if weak:
         print('  ' + ' | '.join(weak[:2 * a.rows]) + (f' | ... {len(weak) - 2 * a.rows} more' if len(weak) > 2 * a.rows else ''))
 
@@ -1204,6 +1681,163 @@ def cmd_compare(a):
         print(f'bar {bar} pitch classes, source: ' + ' '.join(f'{NAMES[k]} {short(s[k] / s.max())}' for k in np.argsort(s)[::-1][:6])
               + ' | score: ' + ' '.join(f'{NAMES[k]} {short(o[k] / o.max())}' for k in np.argsort(o)[::-1][:6]))
     write_detail(a.work, 'compare.txt', full)
+
+
+# ---------------------------------------------------------------- song
+
+def cmd_song(a):
+    grid = saved_grid(a.work)
+    song = json.loads(Path(a.song).read_text())
+    last = grid.bar_at(len(grid.beats) - 1)[0]
+    on_slot = lambda beat: abs((beat - 1) * grid.slots - round((beat - 1) * grid.slots)) < 0.02
+    tune, bad = [], []
+    for key, token in song.get('melody', {}).items():
+        bar, _, beat = key.partition(':')
+        valid = re.fullmatch(r'[1-9]\d*', bar) and re.fullmatch(r'\d+(\.\d+)?', beat) and PITCH.fullmatch(str(token))
+        if valid and int(bar) <= last and 1 <= float(beat) < grid.count(int(bar)) + 1 and on_slot(float(beat)):
+            tune.append((grid.first(int(bar)) + float(beat) - 1, f'{key} {token}', int(bar), midi(token) - 12 * octaves_from_sung(song, int(bar), float(beat))))
+        else:
+            bad.append(f'{key} {token}')
+    tune.sort()
+    tones, bad_chords = {}, []
+    for bar, text in song.get('chords', {}).items():
+        notes = str(text).split()
+        if re.fullmatch(r'[1-9]\d*', bar) and int(bar) <= last and notes and all(PITCH.fullmatch(t + '4') for t in notes):
+            tones[int(bar)] = {midi(t + '4') % 12 for t in notes}
+        else:
+            bad_chords.append(f'{bar}: {text}')
+    bad_sections, owner = [], {}
+    for label, text in song.get('sections', {}).items():
+        m = re.fullmatch(r'([1-9]\d*)(?:-([1-9]\d*))?', str(text))
+        if not m or int(m[2] or m[1]) < int(m[1]) or int(m[2] or m[1]) > last:
+            bad_sections.append(f'{label}: {text}')
+            continue
+        for bar in range(int(m[1]), int(m[2] or m[1]) + 1):
+            owner.setdefault(bar, []).append(label)
+    times, pitch = vocal_f0(a.work)[:2]
+    pitch = in_tune(pitch)
+    src, src_t = source_cqt(a.work)
+    notes = combined(a.work)
+    unsung, unplayed, weak = [], [], []
+    onsets = [grid.time(beat) for beat, *_ in tune] + [math.inf]
+    for i, (beat, text, bar, m) in enumerate(tune):
+        on, after = onsets[i], onsets[i + 1]
+        sung = pitch[(times >= on + SUNG_FROM_S) & (times < min(after, on + SUNG_TO_S))]
+        sung = sung[~np.isnan(sung)]
+        apart = np.abs((sung - m + 6) % 12 - 6)
+        if len(sung) >= 3 and (apart.min() > 0.6 or np.mean(apart <= 0.7) < 0.25):
+            unsung.append(f'{text}<{name(int(round(np.median(sung))))}')
+        elif len(sung) < 3 and not any(abs(grid.slot(n['on']) - beat * grid.slots) <= 1 and n['p'] == m for n in notes):
+            unplayed.append(text)
+        louder = tune_level(src, src_t, on, after, m)[1]
+        if louder is not None:
+            weak.append(f'{text}<{name(louder)}')
+    print(f'{len(tune)} melody notes in bars {bar_ranges(sorted({bar for *_, bar, _ in tune}))}; chords for {len(tones)} of {last} bars')
+    findings = {
+        'melody entries that are not valid (bar:beat on a sixteenth of a bar of the grid, and a pitch such as F#4)': bad,
+        'chord entries that are not valid (a bar of the grid, and pitch names such as "E G B")': bad_chords,
+        'section entries that are not valid (a name and one bar range of the grid, such as "chorus 2": "30-37")': bad_sections,
+        'bars in two sections': [f'{bar} ({" / ".join(labels)})' for bar, labels in sorted(owner.items()) if len(labels) > 1],
+        'bars with no chord (check does not test their notes)': bar_ranges([bar for bar in range(1, last + 1) if bar not in tones]).split(', ') if len(tones) < last else [],
+        'melody notes outside the chord of their bar': [text for _, text, bar, m in tune if bar in tones and m % 12 not in tones[bar]],
+        'melody notes where the voice sings another pitch (bar:beat pitch<sung pitch; octaves not counted)': unsung,
+        'melody notes where the voice does not sing, that no note model has within one slot': unplayed,
+        'melody notes weak in the recording at their onset (bar:beat pitch<louder pitch near it; the MELODY test of compare)': weak}
+    print_findings(a, findings, 'song.txt')
+
+
+def cmd_octave(a):
+    song = json.loads(a.song.read_text(encoding='utf-8'))
+    moved = 0
+    for key, token in song.get('melody', {}).items():
+        bar, _, beat = key.partition(':')
+        if in_ranges(a.ranges, int(bar), float(beat)):
+            song['melody'][key] = name(midi(token) + 12 * a.octaves)
+            moved += 1
+    record = song.setdefault('octaves', {})
+    record[a.ranges] = record.get(a.ranges, 0) + a.octaves
+    song['octaves'] = {spec: n for spec, n in record.items() if n}
+    if not song['octaves']:
+        del song['octaves']
+    a.song.write_text(json.dumps(song, indent=1, ensure_ascii=False) + '\n', encoding='utf-8', newline='')
+    print(f'moved {moved} melody notes in {a.ranges} by {a.octaves:+d} octave{"s" * (abs(a.octaves) != 1)}; `octaves` in {a.song.name} records it, so that compare and song test the sung pitch')
+
+
+# ---------------------------------------------------------------- cells
+
+def cmd_cells(a):
+    grid = saved_grid(a.work)
+    lines = a.draft.read_text(encoding='utf-8').splitlines()
+    drafted = {(int(m[1]), m[2]) for m in map(DRAFT_LINE.fullmatch, lines) if m}
+    last_bar = max((int(m[1]) for m in map(BAR_LINE.match, lines) if m), default=0)
+    carried = {}
+
+    def print_ties(before):
+        """Print the bars before `before` that a tie sounds into and the draft has no line of that lane for."""
+        while due := sorted(((bar, lane, token, length) for lane, (bar, token, length) in carried.items()
+                             if bar < before and bar <= last_bar and (bar, lane) not in drafted), key=lambda tie: tie[0]):
+            for bar, lane, token, length in due:
+                del carried[lane]
+                print(f'{bar} {lane} | ' + ' | '.join(slot_cells(grid, bar, lane, [(0, token, length)], carried)) + ' |')
+
+    for line in lines:
+        bar_line = BAR_LINE.match(line)
+        if bar_line:
+            print_ties(int(bar_line[1]) + 1)
+        m = DRAFT_LINE.fullmatch(line)
+        if not m:
+            print(line)
+            continue
+        bar, lane = int(m[1]), m[2]
+        notes = []
+        for item in (m[3] or '').split():
+            note = SLOT_NOTE.fullmatch(item)
+            if not note or int(note[1]) >= grid.count(bar) * grid.slots:
+                sys.exit(f'bar {bar} {lane}: not slot:pitch/sixteenths in the bar: {item}')
+            notes.append((int(note[1]), note[2], int(note[3])))
+        tie = carried.pop(lane, None)
+        if tie and tie[0] == bar and all(slot for slot, _, _ in notes):
+            notes.append((0, *tie[1:]))
+        print(f'{bar} {lane} | ' + ' | '.join(slot_cells(grid, bar, lane, notes, carried)) + ' |')
+    print_ties(last_bar + 1)
+
+
+def slot_cells(grid, bar, lane, notes, carried):
+    """The pno cells of a bar of a lane from (slot, token, sixteenths). Notes on one slot make a chord; a note ends where the next
+    one starts, and one that sounds into the next bar goes into carried as a tie."""
+    size = grid.count(bar) * grid.slots
+    tokens = ['_'] * size
+    starts = sorted({slot for slot, _, _ in notes})
+    for start, after in zip(starts, starts[1:] + [size]):
+        chord = [(token, length) for slot, token, length in notes if slot == start]
+        end = start + max(length for _, length in chord)
+        stop = min(end, after)
+        tokens[start:stop] = ['+'.join(token for token, _ in chord)] + ['-'] * (stop - start - 1)
+        pitches = [p[0] for token, _ in chord for p in PITCH.finditer(token)]
+        if end > size and pitches:
+            carried[lane] = (bar + 1, '+'.join('~' + p for p in pitches), end - size)
+    if lane in ('rh', 'lh'):
+        if not notes:
+            return ['R']
+        i = 0
+        while i < size:
+            if tokens[i] != '_':
+                i += 1
+                continue
+            length = grid.slots
+            while i % length or i + length > size or any(token != '_' for token in tokens[i:i + length]):
+                length //= 2
+            tokens[i:i + length] = ['r'] + ['-'] * (length - 1)
+            i += length
+    cells = []
+    for first in range(0, size, grid.slots):
+        cell = tokens[first:first + grid.slots]
+        for count in (1, 3, 6) if grid.slots == 6 else (1, 2, 4):
+            step = grid.slots // count
+            if all(token == ('_' if cell[i - i % step] == '_' else '-') for i, token in enumerate(cell) if i % step):
+                break
+        cells.append(' '.join(cell[::step]))
+    return cells
 
 
 # ---------------------------------------------------------------- check
@@ -1281,6 +1915,69 @@ def onsets(score_path):
     return rows, bars, struck
 
 
+def lh_pattern(onsets):
+    """(beat, new pitches) of the left-hand onsets of one bar -> (sixteenths of the onsets, contour of the lowest note: 0 same, 1 step, 2 leap, minus down); None below 2 onsets."""
+    if len(onsets) < 2:
+        return None
+    line = [min(new) for _, new in onsets]
+    moves = [b - a for a, b in zip(line, line[1:])]
+    return frozenset(round(beat * 4) for beat, _ in onsets), tuple((m > 0) - (m < 0) if abs(m) <= 2 else 2 * ((m > 0) - (m < 0)) for m in moves)
+
+
+def is_variant(a, b):
+    """Two bar patterns are one idea: 0.6 or more of the onsets on the same sixteenths, and 0.6 or more of the contour in order."""
+    common = [[0] * (len(b[1]) + 1) for _ in range(len(a[1]) + 1)]
+    for i, x in enumerate(a[1]):
+        for j, y in enumerate(b[1]):
+            common[i + 1][j + 1] = common[i][j] + 1 if x == y else max(common[i][j + 1], common[i + 1][j])
+    return len(a[0] & b[0]) / len(a[0] | b[0]) >= 0.6 and common[-1][-1] / max(len(a[1]), len(b[1]), 1) >= 0.6
+
+
+def section_lines(work, sections, rows, shape, velocities):
+    """One line for each section of song.json: the notes in a beat of each hand, the left-hand bars that vary the bar before, the
+    most common left-hand rhythm, the level of the mix against the mean velocity of the score, and for each stem with notes there,
+    how many of its notes the score strikes (the pitch class within one slot) and the beats where it strikes fewer than half."""
+    grid = saved_grid(work)
+    struck = {}
+    for bar, beat, ln, _, rn, _ in rows:
+        struck.setdefault(round((grid.first(bar) + beat) * grid.slots), set()).update(p % 12 for p in ln + rn)
+    last = grid.bar_at(len(grid.beats) - 1)[0]
+    mix = levels(work, ['src'], [grid.bar_start(bar) for bar in range(1, last + 2)])['src']
+    stems = {'bass': model_notes(work, 'bass')} if (work / 'bass.json').exists() else {}
+    stems |= {stem: combined(work, models) for stem, models in PART_NOTES.items() if all((work / f'{m}.json').exists() for m in models.values())}
+    lines = ['sections: notes in a beat (lh/rh) | left-hand bars that vary the bar before (exact copies) | the most common left-hand rhythm '
+             '(sixteenths) | mix dB, mean velocity | struck notes of each stem (beats with fewer than half)']
+    for label, text in sections.items():
+        first, _, end = str(text).partition('-')
+        bars = range(int(first), int(end or first) + 1)
+        beats = sum(grid.count(bar) for bar in bars)
+        lh = sum(len(ln) for bar, _, ln, *_ in rows if bar in bars)
+        rh = sum(len(rn) for bar, _, _, _, rn, _ in rows if bar in bars)
+        pairs = [(shape.get(bar), shape.get(bar - 1)) for bar in bars if bar - 1 in bars]
+        pairs = [(x, y) for x, y in pairs if x and y]
+        rhythms = Counter(shape[bar][0] for bar in bars if shape.get(bar))
+        if rhythms:
+            onsets, count = rhythms.most_common(1)[0]
+            rhythm = f'{" ".join(map(str, sorted(onsets)))} in {count} of {sum(rhythms.values())} bars'
+        else:
+            rhythm = '-'
+        heard = [mix[bar - 1] for bar in bars if bar <= last]
+        played = [v for (bar, _), notes in velocities.items() if bar in bars for _, v in notes]
+        loudness = f'{np.mean(heard):.0f} dB, ' + (f'{np.mean(played):.0f}' if played else '-') if heard else '-'
+        kept = []
+        for stem, notes in stems.items():
+            slots = [round(grid.slot(n['on'])) for n in notes if grid.place(round(grid.slot(n['on'])))[0] in bars]
+            pcs = [n['p'] % 12 for n in notes if grid.place(round(grid.slot(n['on'])))[0] in bars]
+            if len(slots) >= len(bars):
+                hits = [any(pc in struck.get(s + d, ()) for d in (-1, 0, 1)) for s, pc in zip(slots, pcs)]
+                beat_of = [int(grid.place(s)[1] // grid.slots) + 1 for s in slots]
+                missed = [b for b in sorted(set(beat_of)) if 2 * sum(h for h, x in zip(hits, beat_of) if x == b) < beat_of.count(b)]
+                kept.append(f'{stem} {sum(hits)}/{len(slots)}' + (f' ({" ".join(map(str, missed))})' if missed else ''))
+        lines.append(f'{label} {text}: {lh / beats:.1f}/{rh / beats:.1f} | {sum(is_variant(x, y) for x, y in pairs)} of {len(pairs)} '
+                     f'({sum(x == y for x, y in pairs)}) | {rhythm} | {loudness} | ' + (', '.join(kept) or 'no stem notes'))
+    return lines
+
+
 def cmd_check(a):
     rows, bars, struck = onsets(a.score)
     starts, total = {}, 0
@@ -1299,11 +1996,12 @@ def cmd_check(a):
             bar, beat = key.split(':')
             tune[(int(bar), Fraction(beat).limit_denominator(48) - 1)] = midi(pitch)
         heard = {(bar, beat): ln + lh + rn + rh for bar, beat, ln, lh, rn, rh in rows}
+        inner = lambda key: 'inner' in song and in_ranges(song['inner'], key[0], float(key[1]) + 1)
         findings['melody notes that are not in the score'] = [
             f'{at(*key)} {name(pitch)}' for key, pitch in sorted(tune.items()) if pitch not in heard.get(key, [])]
         findings['melody notes below another note (an octave doubling above is not counted)'] = [
             f'{at(*key)} {name(pitch)} below {name(max(heard[key]))}' for key, pitch in sorted(tune.items())
-            if pitch in heard.get(key, []) and max(heard[key]) % 12 != pitch % 12]
+            if pitch in heard.get(key, []) and max(heard[key]) % 12 != pitch % 12 and not inner(key)]
         quiet = []
         for key, pitch in sorted(tune.items()):
             together = struck.get(key, [])
@@ -1315,60 +2013,50 @@ def cmd_check(a):
         velocities = [v for notes in struck.values() for _, v in notes]
         print(f'velocities in the score: {min(velocities)} to {max(velocities)}')
 
-    times = sorted({clock(bar, beat): (bar, beat) for bar, beat, ln, _, rn, _ in rows if ln or rn}.items())
-    findings['dead spots: 2 beats or more with no new note'] = [
-        f'bar {bar} beat {float(beat) + 1:g}: {float(b0 - a0):g} beats'
-        for (a0, (bar, beat)), (b0, _) in zip(times, times[1:]) if b0 - a0 >= 2 and bar not in free]
+    grid = saved_grid(a.work)
+    seconds = lambda bar, beat: grid.time(clock(bar, beat))
+    info = {}
+    times = sorted({seconds(bar, beat): (bar, beat) for bar, beat, ln, _, rn, _ in rows if ln or rn}.items())
+    info[f'dead spots: {DEAD_S:g} s or more with no new note'] = [
+        f'bar {bar} beat {float(beat) + 1:g}: {s1 - s0:.1f} s'
+        for (s0, (bar, beat)), (s1, _) in zip(times, times[1:]) if s1 - s0 >= DEAD_S and bar not in free]
 
-    left = [(bar, beat, ln) for bar, beat, ln, _, _, _ in rows if ln]
-    findings['left-hand leaps larger than an octave inside a bar (the leap from the bass note is not counted)'] = [
+    left = [(seconds(bar, beat), bar, beat, ln) for bar, beat, ln, _, _, _ in rows if ln]
+    info[f'left-hand leaps larger than an octave in less than {LEAP_S:g} s inside a bar (the leap from the bass note is not counted)'] = [
         f'{at(bar, beat)} {name(before[-1])}->{name(ln[0])}'
-        for (bar0, beat0, before), (bar, beat, ln) in zip(left, left[1:])
-        if bar0 == bar and beat0 != 0 and min(abs(x - y) for x in ln for y in before) > 12]
+        for (s0, bar0, beat0, before), (s1, bar, beat, ln) in zip(left, left[1:])
+        if bar0 == bar and beat0 != 0 and s1 - s0 < LEAP_S and min(abs(x - y) for x in ln for y in before) > 12]
 
-    findings['one-hand spans larger than a tenth'] = [
-        f'{at(bar, beat)} {hand} {name(min(notes))}-{name(max(notes))}'
-        for bar, beat, ln, lh, rn, rh in rows for hand, notes in (('lh', ln + lh), ('rh', rn + rh))
-        if notes and max(notes) - min(notes) > 16]
-
-    right = [(clock(bar, beat), bar, beat, rn) for bar, beat, _, _, rn, _ in rows if rn]
-    findings['right-hand jumps larger than an octave within one beat'] = [
+    right = [(seconds(bar, beat), bar, beat, rn) for bar, beat, _, _, rn, _ in rows if rn]
+    info[f'right-hand jumps larger than an octave in less than {LEAP_S:g} s'] = [
         f'{at(bar, beat)} {name(max(before))}->{name(max(rn))}'
-        for (t0, _, _, before), (t1, bar, beat, rn) in zip(right, right[1:])
-        if t1 - t0 <= 1 and abs(min(rn) - min(before)) > 12 and abs(max(rn) - max(before)) > 12]
+        for (s0, _, _, before), (s1, bar, beat, rn) in zip(right, right[1:])
+        if s1 - s0 < LEAP_S and abs(min(rn) - min(before)) > 12 and abs(max(rn) - max(before)) > 12]
 
     findings['hands overlap or cross'] = [at(bar, beat) for bar, beat, ln, lh, rn, rh in rows
                                           if ln + lh and rn + rh and max(ln + lh) >= min(rn + rh)]
 
-    figure = lambda bar: [(beat, sorted({p % 12 for p in ln})) for b, beat, ln in left if b == bar]
-    if 'parallel' in song:
-        findings['parallel bars with a different left-hand figure'] = [
-            f'{x}/{y}' for x, y in song['parallel'] if figure(x) != figure(y)]
+    shape = {bar: lh_pattern([(beat, ln) for _, b, beat, ln in left if b == bar]) for bar in {bar for bar, *_ in rows} if bar not in free}
+    if 'sections' in song:
+        for line in section_lines(a.work, song['sections'], rows, shape, struck):
+            print(line)
 
-    rhythms = {}
-    for bar in sorted({bar for bar, *_ in rows} - free):
-        rhythms.setdefault(tuple(float(beat) + 1 for beat, _ in figure(bar)), []).append(bar)
-    findings['different left-hand rhythms (free bars not counted)'] = [
-        f'{len(bars)}x {" ".join(f"{b:g}" for b in rhythm) or "none"}' for rhythm, bars in sorted(rhythms.items(), key=lambda kv: -len(kv[1]))]
+    print_findings(a, findings, 'check.txt', info)
 
-    if 'chords' in song:
-        tones = {int(bar): {midi(t + '4') % 12 for t in chord.split()} for bar, chord in song['chords'].items()}
-        inside = lambda bar, pitch: bar not in tones or pitch % 12 in tones[bar]
-        findings['left-hand notes outside the chord of the bar'] = [
-            f'{at(bar, beat)} {name(p)}' for bar, beat, ln in left for p in ln if not inside(bar, p)]
-        tops = [(bar, beat, max(rn)) for _, bar, beat, rn in right]
-        findings['top notes on a beat, outside the chord, that do not move by step to a chord note'] = [
-            f'{at(bar, beat)} {name(top)}->{name(after)}'
-            for (bar, beat, top), (bar1, _, after) in zip(tops, tops[1:])
-            if beat.denominator == 1 and not inside(bar, top) and (abs(after - top) > 2 or not inside(bar1, after))]
 
+def print_findings(a, findings, file, info={}):
+    """Findings with their counts, then information without counts: a count invites a fix to zero of what is intended."""
     for label, items in findings.items():
         if items:
             print(f'[{len(items)}] {label}: ' + ' | '.join(items[:a.rows]) + (f' | ... {len(items) - a.rows} more' if len(items) > a.rows else ''))
     clean = [label for label, items in findings.items() if not items]
     if clean:
         print('[0] ' + '; '.join(clean))
-    write_detail(a.work, 'check.txt', [f'[{len(items)}] {label}: ' + ' | '.join(items) for label, items in findings.items()])
+    for label, items in info.items():
+        if items:
+            print(f'- {label}: ' + ' | '.join(items[:a.rows]) + (' | ...' if len(items) > a.rows else ''))
+    write_detail(a.work, file, [f'[{len(items)}] {label}: ' + ' | '.join(items) for label, items in findings.items()]
+                 + [f'- {label}: ' + ' | '.join(items) for label, items in info.items()])
 
 
 # ---------------------------------------------------------------- command line
@@ -1387,6 +2075,7 @@ def main():
     bars = (['bars'], dict(help='bars, for example 5-8,12'))
     view = (['--view'], dict(choices=list(VIEWS), default='mix', help='the notes to show (default mix); ' + '; '.join(f'{k}: {v}' for k, v in VIEWS.items())))
     rows = (['--rows'], dict(type=int, default=12, help='rows to print for each list (default 12); the file has all rows'))
+    stem = (['--stem'], dict(choices=list(PART_NOTES), help='instead: all notes of one model on this stem (Transkun on piano.wav, basic-pitch on the others)'))
     command(cmd_prepare, 'convert the audio, split stems and track beats, then run the note models on the stems', (['audio'], {}))
     command(cmd_step, 'one step of prepare', (['name'], dict(choices=list(STEPS | AFTER_STEMS))))
     command(cmd_grid, 'the tracked grid, the constant grid, and where they differ; --set or --constant saves grid.json',
@@ -1394,9 +2083,11 @@ def main():
             (['--set'], dict(nargs='*', metavar='FIELD=VALUE', help=f'save the grid; fields: {GRID_FIELDS}')))
     command(cmd_roll, 'merged model notes of each bar', bars,
             view,
-            (['--split'], dict(type=midi, default=59, help='lowest pitch of the high notes (default B3)')))
+            stem,
+            (['--split'], dict(type=midi, default=59, help='lowest pitch of the high notes (default B3)')),
+            (['--beats'], dict(action='store_true', help='also print the chord of each beat, and the second chord where it is likely')))
     command(cmd_raw, 'model notes of each bar with exact beat positions and velocities, re-onsets not merged', bars,
-            view,
+            view, stem,
             (['--lo'], dict(type=midi, default=21)), (['--hi'], dict(type=midi, default=108)),
             (['--min-velocity'], dict(type=int, default=40)))
     command(cmd_bass, 'the bass line of the bass stem, one line for each bar',
@@ -1404,13 +2095,24 @@ def main():
             (['--octave'], dict(type=int, default=0, help='print the line this many octaves higher')))
     command(cmd_tune, 'the sung tune of the vocal stem, one line for each bar; writes a draft melody to tune.json',
             (['bars'], dict(nargs='?', help='bars, for example 5-8,12 (default: each sung bar)')),
-            (['--octave'], dict(type=int, default=0, help='print and save the tune this many octaves higher')))
-    command(cmd_peek, 'loudness of given pitches through time', bars, (['pitches'], dict(help='for example F#5,G5')))
+            (['--octave'], dict(type=int, default=0, help='print and save the tune this many octaves higher')),
+            (['--contour'], dict(action='store_true', help='also print the sung pitch of each slot in 4 steps, with syllable starts')),
+            (['--fine'], dict(action='store_true', help='also print each slot in 3 steps with pitch and level (for one or two bars)')))
+    command(cmd_peek, 'loudness of given pitches through time', bars, (['pitches'], dict(help='for example F#5,G5')),
+            (['--stem'], dict(choices=['src', 'drums', 'bass', 'other', 'vocals', 'lead', 'backing', *PART_NOTES], default='src', help='the audio to read (default src, the mix)')))
     command(cmd_compare, 'compare a score with the recording', (['score'], dict(type=Path)), rows,
             (['--song'], dict(help='JSON with the melody: MELODY tests these notes')),
             (['--bars'], dict(help='also print pitch-class profiles of these bars')))
+    command(cmd_song, 'checks of song.json against the recording, before the score', (['song'], dict(type=Path)), rows)
+    command(cmd_levels, 'when each stem plays, the tuning, and the level of each stem in each bar (each 4 s without a grid)',
+            (['bars'], dict(nargs='?', help='bars, for example 5-8,12 (default: all)')))
+    command(cmd_octave, 'move the melody of song.json in bar ranges by octaves, and record the move from the sung pitch',
+            (['song'], dict(type=Path)), (['ranges'], dict(help='for example 14-21,29:3.5-38 (bar:beat; both ends included)')),
+            (['octaves'], dict(type=int, help='for example 1 or -1')))
+    command(cmd_cells, 'print a draft as pno: lines `BAR LANE slot:pitch/sixteenths ...` (rh, lh, rh2, ...) become bar cells, other lines stay',
+            (['draft'], dict(type=Path)))
     command(cmd_check, 'piano-idiom checks of a score', (['score'], dict(type=Path)), rows,
-            (['--song'], dict(help='JSON with melody, chords, parallel and free_bars')))
+            (['--song'], dict(help='JSON with melody, chords, parallel, free_bars, inner and sections')))
     arguments = parser.parse_args()
     arguments.run(arguments)
 

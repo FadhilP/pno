@@ -350,31 +350,59 @@ fn interval_name(semitones: i32, which: Dissonances) -> Option<&'static str> {
 fn clashes(a: &Analysis, keys: &[Key], bars: &[usize], which: Dissonances, out: &mut String) {
     out.push_str(match which {
         Dissonances::Strong => {
-            "dissonances between the hands (m2, M7, m9; --all adds M2, tritone, m7, M9):\n"
+            "dissonances that sound together a beat or more (m2, M7, m9; --all adds M2, tritone, m7, M9), between the hands, and of an inner or bass note with a note that the pedal holds:\n"
         }
-        Dissonances::All => "dissonances between the hands, up to a ninth:\n",
+        Dissonances::All => {
+            "dissonances that sound together a beat or more, up to a ninth, between the hands, and of an inner or bass note with a note that the pedal holds:\n"
+        }
     });
+    let down = pedal_down(a);
     let mut none = true;
     for (bar, t) in onsets(a, keys, bars) {
         let at = a.abs(bar, t);
-        let held: Vec<&Key> = keys.iter().filter(|k| k.held_at(at)).collect();
-        let hand = |s: Staff| held.iter().filter(move |k| k.hand == s);
+        let layout = &a.score.bars[bar].layout;
+        let beat = layout.cells[layout.cell_at(t).min(layout.cells.len() - 1)];
+        let ringing: Vec<&Key> = keys
+            .iter()
+            .filter(|k| k.held_at(at) || pedal_held(k, at, &down))
+            .collect();
+        // A short neighbour or passing note is not mud.
+        let long = |x: &Key, y: &Key| release(x, &down).min(release(y, &down)) - at >= beat;
+        let hand = |s: Staff| ringing.iter().filter(move |k| k.hand == s);
+        let mut found = Vec::new();
         for r in hand(Staff::Upper) {
             for l in hand(Staff::Lower) {
-                let new = r.attacked_at(at) || l.attacked_at(at);
-                let Some(name) = interval_name((r.midi() - l.midi()).abs(), which) else {
-                    continue;
-                };
-                if new {
-                    none = false;
-                    let _ = writeln!(
-                        out,
-                        "{:<8} rh {} / lh {}: {name}",
-                        position(a.score, bar, t),
-                        r.pitch,
-                        l.pitch
-                    );
+                if (r.attacked_at(at) || l.attacked_at(at)) && long(r, l) {
+                    found.push((
+                        r.midi() - l.midi(),
+                        format!("rh {} / lh {}", r.pitch, l.pitch),
+                    ));
                 }
+            }
+        }
+        // The tune can step under one pedal; an inner line or a bass that steps under it blurs.
+        let tune = hand(Staff::Upper)
+            .filter(|k| k.held_at(at))
+            .map(|k| k.midi())
+            .max();
+        for new in ringing.iter().filter(|k| k.attacked_at(at)) {
+            if new.hand == Staff::Upper && tune.is_some_and(|t| (t - new.midi()) % 12 == 0) {
+                continue;
+            }
+            let lane = if new.hand == Staff::Upper { "rh" } else { "lh" };
+            for held in hand(new.hand).filter(|k| pedal_held(k, at, &down) && long(new, k)) {
+                found.push((
+                    (new.midi() - held.midi()).abs(),
+                    format!("{lane} {} (pedal) / {}", held.pitch, new.pitch),
+                ));
+            }
+        }
+        found.sort();
+        found.dedup();
+        for (semitones, pair) in found {
+            if let Some(name) = interval_name(semitones, which) {
+                none = false;
+                let _ = writeln!(out, "{:<8} {pair}: {name}", position(a.score, bar, t));
             }
         }
     }

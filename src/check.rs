@@ -1,10 +1,10 @@
 use crate::analysis::{Analysis, Leaf, NoteRef, Part};
 use crate::diag::Diag;
 use crate::frac::Frac;
-use crate::model::{Lane, Score, Staff};
+use crate::model::{Event, Lane, Score, Staff, TokMark};
 
-// More than a tenth in one hand at one time.
 const PIANO: std::ops::RangeInclusive<i32> = 21..=108;
+// More than a tenth in one hand at one time, if no chord of the hand is rolled.
 const WIDE_SPAN: i32 = 16;
 
 pub fn expected_labels(score: &Score) -> Vec<String> {
@@ -114,6 +114,19 @@ fn note_refs(a: &Analysis, leaf: usize) -> Vec<NoteRef> {
 
 fn velocity_range(a: &Analysis, diags: &mut Vec<Diag>) {
     for (i, leaf) in a.leaves.iter().enumerate() {
+        let mains = leaf.event().map_or(0, |ev| {
+            ev.notes()
+                .iter()
+                .filter(|n| n.has(crate::model::PitchMark::Main))
+                .count()
+        });
+        if mains > 1 {
+            diags.push(Diag::error(
+                leaf.src,
+                a.location(leaf.bar, leaf.lane, leaf.start),
+                "a chord has one main note: write ^m on one pitch only".to_string(),
+            ));
+        }
         for r in note_refs(a, i) {
             let v = a.velocity(r).note;
             if (1.0..=127.0).contains(&v) || a.muted(r) {
@@ -132,15 +145,29 @@ fn velocity_range(a: &Analysis, diags: &mut Vec<Diag>) {
     }
 }
 
-fn sounding(a: &Analysis, bar: usize, staff: Staff, t: Frac) -> Vec<i32> {
+fn sounding_events<'a>(
+    a: &'a Analysis,
+    bar: usize,
+    staff: Staff,
+    t: Frac,
+) -> impl Iterator<Item = &'a Event> {
     a.leaves
         .iter()
-        .filter(|l| {
+        .filter(move |l| {
             l.bar == bar && Analysis::home_staff(l.lane) == staff && l.start <= t && t < l.end()
         })
         .filter_map(Leaf::event)
+}
+
+fn sounding(a: &Analysis, bar: usize, staff: Staff, t: Frac) -> Vec<i32> {
+    sounding_events(a, bar, staff, t)
         .flat_map(|ev| ev.notes().iter().map(|n| n.pitch.midi()))
         .collect()
+}
+
+fn rolled(a: &Analysis, bar: usize, staff: Staff, t: Frac) -> bool {
+    sounding_events(a, bar, staff, t)
+        .any(|ev| ev.marks.iter().any(|m| matches!(m, TokMark::Arp(_))))
 }
 
 fn hand_warnings(a: &Analysis, diags: &mut Vec<Diag>) {
@@ -178,11 +205,14 @@ fn hand_warnings(a: &Analysis, diags: &mut Vec<Diag>) {
                     "a note is outside the piano (A0 to C8)",
                 ));
             }
-            for (k, (notes, lane)) in [(&rh, "rh"), (&lh, "lh")].into_iter().enumerate() {
+            for (k, (notes, lane, staff)) in [(&rh, "rh", Staff::Upper), (&lh, "lh", Staff::Lower)]
+                .into_iter()
+                .enumerate()
+            {
                 let (Some(lo), Some(hi)) = (notes.iter().min(), notes.iter().max()) else {
                     continue;
                 };
-                if hi - lo > WIDE_SPAN && !wide[k] {
+                if hi - lo > WIDE_SPAN && !wide[k] && !rolled(a, b, staff, t) {
                     wide[k] = true;
                     diags.push(Diag::warning(
                         bar.src,

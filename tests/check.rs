@@ -128,6 +128,11 @@ fn invalid_inputs_give_located_errors() {
             "needs its ratio, for example 9:8[",
         ),
         (
+            "two_main_notes",
+            format!("1 rh | C5^m+E5^m | D5 | E5 | F5 |\n1 lh {R}"),
+            "a chord has one main note",
+        ),
+        (
             "bad_pitch_mark",
             format!("1 rh | C5^q | D5 | E5 | F5 |\n1 lh {R}"),
             "`^q` is not a pitch mark",
@@ -165,7 +170,7 @@ fn unknown_header_attribute_is_an_error() {
 fn hand_warnings_do_not_fail_the_check() {
     let run = check_text(
         "hands",
-        "1 rh | C3 | C4+G5 | E5 | F5 |\n1 lh | C5 | - | - | - |",
+        "1 rh | C3 | C4+G5 | E5 | F5 |\n1 lh | C5 | - | - | - |\n2 rh | C4+G5:arp | - | - | - |\n2 lh | R |",
     );
     assert_eq!(run.code, 0, "{}", run.stdout);
     assert!(
@@ -176,6 +181,11 @@ fn hand_warnings_do_not_fail_the_check() {
     assert!(
         run.stdout
             .contains("warning: 1 rh cell 2: a span of 19 semitones"),
+        "{}",
+        run.stdout
+    );
+    assert!(
+        !run.stdout.contains("2 rh cell 1: a span"),
         "{}",
         run.stdout
     );

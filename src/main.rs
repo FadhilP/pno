@@ -13,6 +13,7 @@ mod model;
 mod musicxml;
 mod perform;
 mod render;
+mod sheet;
 mod text;
 mod video;
 
@@ -154,6 +155,9 @@ struct ExportArgs {
     /// Video: the note colours of the upper and the lower staff, for example 5CC478,5494E4
     #[arg(long, value_name = "RH,LH")]
     colors: Option<String>,
+    /// Video: show the score in a band below the keyboard or at the top, with a cursor that follows the music
+    #[arg(long, value_enum, num_args = 0..=1, default_missing_value = "below")]
+    sheet: Option<sheet::Place>,
 }
 
 #[derive(Subcommand)]
@@ -229,6 +233,15 @@ fn bar_range(score: &Score, spec: &str) -> Result<RangeInclusive<usize>, Failure
         return Err(usage(format!("the bar range {spec} is reversed")));
     }
     Ok(a..=b)
+}
+
+// Playback from bar 1 starts with the pickup before it.
+fn with_pickup(score: &Score, range: RangeInclusive<usize>) -> RangeInclusive<usize> {
+    if *range.start() == 1 && score.bars[0].label == "0" {
+        0..=*range.end()
+    } else {
+        range
+    }
 }
 
 fn bar_ranges(score: &Score, spec: &str) -> Result<Vec<RangeInclusive<usize>>, Failure> {
@@ -459,6 +472,7 @@ struct Sources<'a> {
     xml: Option<String>,
     // The notation without pedal marks, for PDF, PNG, SVG and the other picture formats.
     notation_xml: Option<String>,
+    sheet: Option<sheet::Source>,
 }
 
 fn export_one(out: &Path, kind: Output, src: &Sources) -> Result<Vec<PathBuf>, String> {
@@ -475,7 +489,7 @@ fn export_one(out: &Path, kind: Output, src: &Sources) -> Result<Vec<PathBuf>, S
             let silent = render::temp_path("mp4");
             let (sound, picture) = std::thread::scope(|s| {
                 let sound = s.spawn(|| audio::render(&bytes, sfz, &wav));
-                let picture = video::render(p, &src.hands, &silent);
+                let picture = video::render(p, &src.hands, src.sheet.as_ref(), &silent);
                 (sound.join(), picture)
             });
             let sound = sound.unwrap_or_else(|_| Err("the audio render failed".into()));
@@ -649,6 +663,7 @@ fn export(args: ExportArgs) -> Result<(), Failure> {
         sound,
         bars,
         colors,
+        sheet,
     } = args;
     let score = checked(&file)?;
     let a = analysis::Analysis::new(&score);
@@ -663,6 +678,9 @@ fn export(args: ExportArgs) -> Result<(), Failure> {
     }
     if colors.is_some() && !has(Output::Video) {
         return Err(usage("--colors applies only to video output"));
+    }
+    if sheet.is_some() && !has(Output::Video) {
+        return Err(usage("--sheet applies only to video output"));
     }
     let sampled_with_sound = sampled && sound.is_some();
     let performed = has(Output::Midi) || sampled_with_sound;
@@ -686,7 +704,10 @@ fn export(args: ExportArgs) -> Result<(), Failure> {
         Some(f) if f > 0.0 && f <= 4.0 => perform::Shaping::Phrases(f),
         Some(_) => return Err(usage("--phrase AMOUNT is above 0 and at most 4")),
     };
-    let bars = bars.map(|b| bar_range(&score, &b)).transpose()?;
+    let bars = bars
+        .map(|b| bar_range(&score, &b))
+        .transpose()?
+        .map(|r| with_pickup(&score, r));
     let mode = match (humanize, seed) {
         (false, _) => perform::Humanize::Off,
         (true, Some(s)) => perform::Humanize::Seed(s),
@@ -725,6 +746,10 @@ fn export(args: ExportArgs) -> Result<(), Failure> {
         notation_xml: has(Output::Notation)
             .then(|| xml_with(musicxml::PedalMarks::Hide))
             .transpose()?,
+        sheet: sheet
+            .map(|place| sheet_source(&a, place))
+            .transpose()
+            .map_err(|e| Failure { code: 1, msg: e })?,
     };
     let mut failed: Vec<String> = Vec::new();
     for (path, kind) in out.iter().zip(&kinds) {
@@ -741,6 +766,15 @@ fn export(args: ExportArgs) -> Result<(), Failure> {
     Err(Failure {
         code: 1,
         msg: failed.join("\n"),
+    })
+}
+
+fn sheet_source(a: &analysis::Analysis, place: sheet::Place) -> Result<sheet::Source, String> {
+    let all = 0..=a.score.bars.len().saturating_sub(1);
+    Ok(sheet::Source {
+        place,
+        xml: musicxml::export(a, musicxml::Scope::Bars(all), musicxml::PedalMarks::Hide)?,
+        bars: perform::bar_onsets(a),
     })
 }
 

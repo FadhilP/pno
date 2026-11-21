@@ -4,12 +4,14 @@ use std::process::{Command, Stdio};
 
 use crate::model::Staff;
 use crate::perform::{Performance, Played, TICKS_PER_QUARTER};
+use crate::sheet::{self, Place, Sheet, TimedBar};
 
-const WIDTH: usize = 1920;
+pub const WIDTH: usize = 1920;
 const HEIGHT: usize = 1080;
 const FPS: f64 = 60.0;
 const KEYBOARD_HEIGHT: usize = 200;
-const KEYBOARD_TOP: usize = HEIGHT - KEYBOARD_HEIGHT;
+// The system of the sheet takes at most this part of the frame.
+const SHEET_PART: f64 = 0.3;
 // A note falls from the top of the frame to the keyboard in this time.
 const SECONDS_SHOWN: f64 = 3.0;
 // The video starts this long before the music, so that the first notes fall.
@@ -20,7 +22,7 @@ const LOWEST_KEY: u8 = 21;
 const HIGHEST_KEY: u8 = 108;
 const WHITE_KEYS: f64 = 52.0;
 
-type Rgb = [u8; 3];
+pub type Rgb = [u8; 3];
 const BACKGROUND: Rgb = [24, 24, 28];
 const PEDAL_DOWN: Rgb = [43, 36, 63];
 // The press of the pedal, and the strip above the keyboard while the pedal is down.
@@ -139,6 +141,8 @@ struct Timed {
 }
 
 struct Scene {
+    keyboard_top: usize,
+    sheet: Option<(Sheet, usize)>,
     keys: Vec<Key>,
     notes: Vec<Timed>,
     // The times when the pedal is down.
@@ -148,7 +152,8 @@ struct Scene {
 
 fn draw(frame: &mut Frame, scene: &Scene, now: f64) {
     let keys = &scene.keys;
-    let top = KEYBOARD_TOP as f64;
+    let keyboard_top = scene.keyboard_top;
+    let top = keyboard_top as f64;
     // The keyboard line is `now`.
     let row = |t: f64| {
         (top - (t - now) * top / SECONDS_SHOWN)
@@ -166,7 +171,7 @@ fn draw(frame: &mut Frame, scene: &Scene, now: f64) {
     }
     let each_c = keys.iter().zip(LOWEST_KEY..).filter(|(_, n)| n % 12 == 0);
     for (k, _) in each_c {
-        frame.fill(k.x, 0, 1, KEYBOARD_TOP, OCTAVE_LINE);
+        frame.fill(k.x, 0, 1, keyboard_top, OCTAVE_LINE);
     }
     for &t in scene.bars.iter().filter(|&&t| shown(t, t)) {
         frame.fill(0, row(t), WIDTH, 1, BAR_LINE);
@@ -197,27 +202,30 @@ fn draw(frame: &mut Frame, scene: &Scene, now: f64) {
     if pedal_down {
         frame.fill(
             0,
-            KEYBOARD_TOP - PEDAL_STRIP,
+            keyboard_top - PEDAL_STRIP,
             WIDTH,
             PEDAL_STRIP,
             PEDAL_MARK,
         );
     }
-    frame.fill(0, KEYBOARD_TOP, WIDTH, 3, [200, 60, 60]);
+    frame.fill(0, keyboard_top, WIDTH, 3, [200, 60, 60]);
     for (k, d) in keys.iter().zip(&down).filter(|(k, _)| !k.black) {
         frame.fill(
             k.x,
-            KEYBOARD_TOP + 3,
+            keyboard_top + 3,
             k.width,
             KEYBOARD_HEIGHT - 3,
             d.unwrap_or(WHITE),
         );
-        frame.fill(k.x, KEYBOARD_TOP + 3, 1, KEYBOARD_HEIGHT - 3, GAP);
+        frame.fill(k.x, keyboard_top + 3, 1, KEYBOARD_HEIGHT - 3, GAP);
     }
     let black_height = (KEYBOARD_HEIGHT as f64 * 0.62).floor() as usize;
     for (k, d) in keys.iter().zip(&down).filter(|(k, _)| k.black) {
         let c = d.map_or(BLACK, |c| shade(c, 0.75));
-        frame.fill(k.x, KEYBOARD_TOP + 3, k.width, black_height, c);
+        frame.fill(k.x, keyboard_top + 3, k.width, black_height, c);
+    }
+    if let Some((sheet, band_top)) = &scene.sheet {
+        sheet.draw(&mut frame.0, WIDTH, *band_top, now);
     }
 }
 
@@ -259,17 +267,66 @@ fn pedal_spans(p: &Performance, end: f64) -> Vec<(f64, f64)> {
     spans
 }
 
-fn ffmpeg() -> Command {
+pub fn ffmpeg() -> Command {
     let program = std::env::var_os("PNO_FFMPEG").unwrap_or_else(|| "ffmpeg".into());
     let mut cmd = Command::new(program);
     cmd.args(["-y", "-loglevel", "error"]);
     cmd
 }
 
-const NO_FFMPEG: &str = "Install ffmpeg and put it on the PATH, or set PNO_FFMPEG to its path";
+pub const NO_FFMPEG: &str = "Install ffmpeg and put it on the PATH, or set PNO_FFMPEG to its path";
+
+fn timed_bars(p: &Performance, src: &sheet::Source) -> Vec<TimedBar> {
+    let at = |tick: f64| seconds(&p.tempo, tick);
+    p.bars
+        .iter()
+        .map(|b| {
+            let written = &src.bars[b.bar];
+            TimedBar {
+                bar: b.bar,
+                start: at(b.start),
+                end: at(b.start + written.length),
+                onsets: written.onsets.iter().map(|&t| at(b.start + t)).collect(),
+            }
+        })
+        .collect()
+}
+
+// The rows of the falling notes and the keyboard, and the sheet with the top of its band.
+fn layout(p: &Performance, src: Option<&sheet::Source>) -> Result<Scene, String> {
+    let Some(src) = src else {
+        return Ok(scene(HEIGHT - KEYBOARD_HEIGHT, None));
+    };
+    let slot = (HEIGHT as f64 * SHEET_PART) as usize;
+    let sheet = sheet::prepare(src, &timed_bars(p, src), WIDTH, slot)?;
+    let band = sheet.height();
+    Ok(match src.place {
+        Place::Below => scene(
+            HEIGHT - band - KEYBOARD_HEIGHT,
+            Some((sheet, HEIGHT - band)),
+        ),
+        Place::Top => scene(HEIGHT - KEYBOARD_HEIGHT, Some((sheet, 0))),
+    })
+}
+
+fn scene(keyboard_top: usize, sheet: Option<(Sheet, usize)>) -> Scene {
+    Scene {
+        keyboard_top,
+        sheet,
+        keys: keys(),
+        notes: Vec::new(),
+        pedal: Vec::new(),
+        bars: Vec::new(),
+    }
+}
 
 // Falling notes over a keyboard, encoded by ffmpeg with no audio.
-pub fn render(p: &Performance, hands: &Hands, out: &Path) -> Result<(), String> {
+pub fn render(
+    p: &Performance,
+    hands: &Hands,
+    sheet: Option<&sheet::Source>,
+    out: &Path,
+) -> Result<(), String> {
     let end = seconds(&p.tempo, p.end);
     let mut notes: Vec<Timed> = p.notes.iter().filter_map(|n| timed(p, hands, n)).collect();
     let mut next_on = [f64::INFINITY; 88];
@@ -279,10 +336,10 @@ pub fn render(p: &Performance, hands: &Hands, out: &Path) -> Result<(), String> 
         next_on[n.key] = n.on;
     }
     let scene = Scene {
-        keys: keys(),
         notes,
         pedal: pedal_spans(p, end),
-        bars: p.bars.iter().map(|&t| seconds(&p.tempo, t)).collect(),
+        bars: p.bars.iter().map(|b| seconds(&p.tempo, b.start)).collect(),
+        ..layout(p, sheet)?
     };
     let size = format!("{WIDTH}x{HEIGHT}");
     let mut encoder = ffmpeg()

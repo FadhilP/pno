@@ -251,7 +251,7 @@ fn phrase_fields(score: &crate::model::Score) -> Vec<String> {
 }
 
 fn vel_lines(score: &crate::model::Score) -> Vec<String> {
-    let is_vel = |a: &Attr| matches!(a, Attr::VelMark(..) | Attr::VelLane(..));
+    let is_vel = |a: &Attr| matches!(a, Attr::VelMark(..) | Attr::VelLane(..) | Attr::Voicing(..));
     let mut out: Vec<String> = score
         .header
         .iter()

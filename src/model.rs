@@ -396,6 +396,8 @@ pub enum PitchMark {
     Vel(f64),
     // `^v0`: the note is drawn and does not sound.
     Mute,
+    // `^m`: the main note of a chord, which the voicing level of the lane does not lower.
+    Main,
     Attack(f64),
     Release(f64),
     TieUp,
@@ -923,6 +925,7 @@ pub enum Attr {
     PedalStyle(PedalStyle),
     VelMark(DynMark, f64),
     VelLane(Lane, f64),
+    Voicing(Lane, f64),
     Program(u32),
     Volume(f64),
     Pan(f64),
@@ -950,10 +953,14 @@ impl Attr {
                 let (a, b, _) = l.order();
                 (13, u32::from(a) * 16 + u32::from(b))
             }
-            Attr::Program(_) => (14, 0),
-            Attr::Volume(_) => (15, 0),
-            Attr::Pan(_) => (16, 0),
-            Attr::OneStaff => (17, 0),
+            Attr::Voicing(l, _) => {
+                let (a, b, _) = l.order();
+                (14, u32::from(a) * 16 + u32::from(b))
+            }
+            Attr::Program(_) => (15, 0),
+            Attr::Volume(_) => (16, 0),
+            Attr::Pan(_) => (17, 0),
+            Attr::OneStaff => (18, 0),
         }
     }
 
